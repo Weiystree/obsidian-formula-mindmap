@@ -9,6 +9,7 @@ import {
 	WorkspaceLeaf,
 } from 'obsidian';
 import {
+	DEFAULT_ROOT_LATEX,
 	descendantsOf,
 	emptyData,
 	extractBlock,
@@ -20,6 +21,8 @@ import {
 	replaceBlock,
 	serializeData,
 } from './types';
+import { CATEGORY_LABELS, FMMCategory, parseAIAnswer } from './parser';
+import { ImportModal } from './import-modal';
 import { ConfirmModal, FormulaEditModal } from './edit-modal';
 
 export const VIEW_TYPE_FMM = 'formula-mindmap-view';
@@ -116,9 +119,12 @@ export class FormulaMindMapView extends ItemView {
 		btnIn.setAttribute('aria-label', '放大');
 		const btnFit = zoom.createEl('button', { text: '⤢' });
 		btnFit.setAttribute('aria-label', '适应视图');
+		const btnImport = zoom.createEl('button', { text: '⤓ 导入' });
+		btnImport.setAttribute('aria-label', '导入 AI 回答（粘贴后自动生成导图）');
 		btnOut.addEventListener('click', () => this.zoomBy(1 / 1.2));
 		btnIn.addEventListener('click', () => this.zoomBy(1.2));
 		btnFit.addEventListener('click', () => this.fitView());
+		btnImport.addEventListener('click', () => this.openImportModal());
 
 		this.registerDomEvent(this.canvasEl, 'pointerdown', this.onPointerDown);
 		this.registerDomEvent(this.canvasEl, 'pointermove', this.onPointerMove);
@@ -220,7 +226,7 @@ export class FormulaMindMapView extends ItemView {
 		const tasks: Promise<void>[] = [];
 		for (const node of this.data.nodes) {
 			this.createNodeEl(node);
-			tasks.push(this.renderLatex(node.id, node.latex));
+			tasks.push(this.renderNode(node.id));
 		}
 		await Promise.all(tasks);
 		this.updateEdges();
@@ -229,13 +235,26 @@ export class FormulaMindMapView extends ItemView {
 	private createNodeEl(node: FMMNode): HTMLElement {
 		const el = this.worldEl.createDiv('fmm-node');
 		el.dataset.id = node.id;
+		const type = node.type ?? 'formula';
+		el.addClass(
+			type === 'group' ? 'fmm-node-group' : type === 'text' ? 'fmm-node-text' : 'fmm-node-formula'
+		);
+		if (type === 'group' && node.category) el.addClass('fmm-cat-' + node.category);
 		el.createDiv('fmm-node-content');
+		if (type === 'group') {
+			const col = el.createEl('button', { text: node.collapsed ? '▸' : '▾' });
+			col.addClass('fmm-node-collapse');
+			col.setAttribute('aria-label', node.collapsed ? '展开' : '收起');
+			col.addEventListener('click', (e) => {
+				e.stopPropagation();
+				void this.toggleGroup(node.id);
+			});
+		}
 		const addBtn = el.createEl('button', { text: '+' });
 		addBtn.addClass('fmm-node-add');
 		addBtn.setAttribute('aria-label', '添加子节点');
 		addBtn.addEventListener('click', (e) => {
 			e.stopPropagation();
-			if (node.parent === null && !this.data.nodes.find((n) => n.id === node.id)) return;
 			this.addChildNode(node.id);
 		});
 		this.nodeEls.set(node.id, el);
@@ -243,28 +262,62 @@ export class FormulaMindMapView extends ItemView {
 		return el;
 	}
 
-	private async renderLatex(id: string, latex: string): Promise<void> {
+	private async renderNode(id: string): Promise<void> {
 		const el = this.nodeEls.get(id);
-		if (!el) return;
+		const node = this.data.nodes.find((n) => n.id === id);
+		if (!el || !node) return;
 		const token = (this.renderTokens.get(id) ?? 0) + 1;
 		this.renderTokens.set(id, token);
 		const content = el.querySelector('.fmm-node-content') as HTMLElement | null;
 		if (!content) return;
 		content.empty();
-		content.removeClass('fmm-muted');
-		content.removeClass('fmm-raw');
-		const src = latex.trim();
-		if (!src) {
-			content.setText('（双击输入公式）');
-			content.addClass('fmm-muted');
-			this.scheduleEdges();
-			return;
-		}
-		try {
-			await MarkdownRenderer.render(this.app, '$$' + src + '$$', content, this.path, this);
-		} catch (e) {
-			content.setText(src);
-			content.addClass('fmm-raw');
+		const type = node.type ?? 'formula';
+		if (type === 'group') {
+			const title = content.createDiv('fmm-group-title');
+			title.setText(node.label || CATEGORY_LABELS[node.category as FMMCategory] || '分组');
+			if (node.collapsed) {
+				const paras = (node.body ?? '').split(/\n{2,}/).filter((s) => s.trim()).length;
+				content.createDiv('fmm-group-meta').setText(`${paras} 段内容 · 双击展开`);
+			} else {
+				const bodyEl = content.createDiv('fmm-group-body');
+				const body = (node.body ?? '').trim();
+				if (!body) {
+					bodyEl.addClass('fmm-muted');
+					bodyEl.setText('（空）');
+				} else {
+					try {
+						await MarkdownRenderer.render(this.app, body, bodyEl, this.path, this);
+					} catch (e) {
+						bodyEl.setText(body);
+					}
+				}
+			}
+		} else if (type === 'text') {
+			const body = (node.body ?? node.label ?? '').trim();
+			if (!body) {
+				content.setText('（空）');
+				content.addClass('fmm-muted');
+			} else {
+				try {
+					await MarkdownRenderer.render(this.app, body, content, this.path, this);
+				} catch (e) {
+					content.setText(body);
+				}
+			}
+		} else {
+			const src = node.latex.trim();
+			if (!src) {
+				content.setText('（双击输入公式）');
+				content.addClass('fmm-muted');
+				this.scheduleEdges();
+				return;
+			}
+			try {
+				await MarkdownRenderer.render(this.app, '$$' + src + '$$', content, this.path, this);
+			} catch (e) {
+				content.setText(src);
+				content.addClass('fmm-raw');
+			}
 		}
 		if (this.renderTokens.get(id) !== token) return;
 		this.scheduleEdges();
@@ -417,7 +470,11 @@ export class FormulaMindMapView extends ItemView {
 			el.removeClass('fmm-dragging');
 			el.style.pointerEvents = '';
 		}
-		if (g.moved) this.scheduleSave();
+		if (g.moved) {
+			const dragged = this.data.nodes.find((n) => n.id === g.id);
+			if (dragged) dragged.manuallyMoved = true;
+			this.scheduleSave();
+		}
 		if (this.dropTargetId) {
 			const target = this.dropTargetId;
 			this.clearDropTarget();
@@ -474,7 +531,13 @@ export class FormulaMindMapView extends ItemView {
 		e.preventDefault();
 		const nodeEl = target.closest('.fmm-node') as HTMLElement | null;
 		if (nodeEl?.dataset.id) {
-			this.openEditor(nodeEl.dataset.id);
+			const id = nodeEl.dataset.id;
+			const node = this.data.nodes.find((n) => n.id === id);
+			if (node && (node.type ?? 'formula') === 'group') {
+				void this.toggleGroup(id);
+				return;
+			}
+			this.openEditor(id);
 			return;
 		}
 		const { x, y } = this.screenToWorld(e.clientX, e.clientY);
@@ -482,7 +545,7 @@ export class FormulaMindMapView extends ItemView {
 		this.data.nodes.push(node);
 		this.createNodeEl(node);
 		this.select(node.id);
-		void this.renderLatex(node.id, node.latex);
+		void this.renderNode(node.id);
 		this.updateEdges();
 		this.scheduleSave();
 		this.openEditor(node.id);
@@ -496,9 +559,22 @@ export class FormulaMindMapView extends ItemView {
 		const nodeEl = target.closest('.fmm-node') as HTMLElement | null;
 		if (nodeEl?.dataset.id) {
 			const id = nodeEl.dataset.id;
+			const node = this.data.nodes.find((n) => n.id === id);
+			const type = node?.type ?? 'formula';
 			menu.addItem((item) =>
-				item.setTitle('编辑公式').setIcon('pencil').onClick(() => this.openEditor(id))
+				item
+					.setTitle(type === 'formula' ? '编辑公式' : '编辑内容')
+					.setIcon('pencil')
+					.onClick(() => this.openEditor(id))
 			);
+			if (type === 'group') {
+				menu.addItem((item) =>
+					item
+						.setTitle(node?.collapsed ? '展开' : '收起')
+						.setIcon(node?.collapsed ? 'chevrons-down-up' : 'chevrons-up-down')
+						.onClick(() => void this.toggleGroup(id))
+				);
+			}
 			menu.addItem((item) =>
 				item.setTitle('添加子节点').setIcon('plus').onClick(() => this.addChildNode(id))
 			);
@@ -514,7 +590,7 @@ export class FormulaMindMapView extends ItemView {
 					this.data.nodes.push(node);
 					this.createNodeEl(node);
 					this.select(node.id);
-					void this.renderLatex(node.id, node.latex);
+					void this.renderNode(node.id);
 					this.updateEdges();
 					this.scheduleSave();
 					this.openEditor(node.id);
@@ -534,6 +610,17 @@ export class FormulaMindMapView extends ItemView {
 	};
 
 	private onKeyDown = (e: KeyboardEvent): void => {
+		if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+			e.preventDefault();
+			navigator.clipboard
+				?.readText()
+				.then((t) => {
+					if (t && t.trim()) void this.importAnswer(t);
+					else new Notice('剪贴板是空的');
+				})
+				.catch(() => new Notice('无法读取剪贴板，请用右下角「导入」按钮粘贴'));
+			return;
+		}
 		if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedId) {
 			e.preventDefault();
 			this.deleteNode(this.selectedId);
@@ -561,10 +648,21 @@ export class FormulaMindMapView extends ItemView {
 	private openEditor(id: string): void {
 		const node = this.data.nodes.find((n) => n.id === id);
 		if (!node) return;
-		new FormulaEditModal(this.app, node.latex, (latex) => {
-			node.latex = latex;
-			void this.renderLatex(id, latex);
-			this.scheduleSave();
+		const type = node.type ?? 'formula';
+		new FormulaEditModal(this.app, {
+			title: type === 'formula' ? '编辑公式' : type === 'text' ? '编辑文字内容' : '编辑分组内容',
+			mode: type === 'formula' ? 'latex' : 'markdown',
+			value: type === 'formula' ? node.latex : node.body ?? '',
+			onSubmit: (v) => {
+				if (type === 'formula') {
+					node.latex = v;
+				} else {
+					node.body = v;
+					if (v) node.label = v.split(/\r?\n/)[0].slice(0, 60);
+				}
+				void this.renderNode(id);
+				this.scheduleSave();
+			},
 		}).open();
 	}
 
@@ -583,7 +681,7 @@ export class FormulaMindMapView extends ItemView {
 		this.data.nodes.push(node);
 		this.createNodeEl(node);
 		this.select(node.id);
-		void this.renderLatex(node.id, node.latex);
+		void this.renderNode(node.id);
 		this.updateEdges();
 		this.scheduleSave();
 		this.openEditor(node.id);
@@ -611,12 +709,106 @@ export class FormulaMindMapView extends ItemView {
 					const root = emptyData().nodes[0];
 					this.data.nodes.push(root);
 					this.createNodeEl(root);
-					void this.renderLatex(root.id, root.latex);
+					void this.renderNode(root.id);
 				}
 				this.updateEdges();
 				this.scheduleSave();
 			}
 		).open();
+	}
+
+	// ---------- 导入与分组 ----------
+
+	openImportModal(): void {
+		new ImportModal(this.app, (text) => void this.importAnswer(text)).open();
+	}
+
+	private async toggleGroup(id: string): Promise<void> {
+		const node = this.data.nodes.find((n) => n.id === id);
+		const el = this.nodeEls.get(id);
+		if (!node || !el || (node.type ?? 'formula') !== 'group') return;
+		const oldH = el.offsetHeight;
+		node.collapsed = !node.collapsed;
+		const col = el.querySelector('.fmm-node-collapse');
+		if (col) {
+			col.textContent = node.collapsed ? '▸' : '▾';
+			col.setAttribute('aria-label', node.collapsed ? '展开' : '收起');
+		}
+		await this.renderNode(id);
+		const delta = el.offsetHeight - oldH;
+		if (delta !== 0) {
+			for (const n of this.data.nodes) {
+				if (n.id === id || n.manuallyMoved) continue;
+				if (Math.abs(n.x - node.x) > 2) continue;
+				if (n.y <= node.y) continue;
+				n.y += delta;
+				this.positionNode(n);
+			}
+		}
+		this.scheduleEdges();
+		this.scheduleSave();
+	}
+
+	async importAnswer(text: string): Promise<void> {
+		const parsed = parseAIAnswer(text);
+		if (!parsed) {
+			new Notice('没有解析出内容');
+			return;
+		}
+		const root = parsed.nodes[0];
+		const children = parsed.nodes.slice(1);
+
+		// 空白默认图（只有未动过的默认根节点）直接替换
+		if (
+			this.data.nodes.length === 1 &&
+			this.data.nodes[0].latex === DEFAULT_ROOT_LATEX &&
+			!this.data.nodes[0].manuallyMoved
+		) {
+			const old = this.data.nodes[0];
+			this.nodeEls.get(old.id)?.remove();
+			this.nodeEls.delete(old.id);
+			this.renderTokens.delete(old.id);
+			this.data.nodes = [];
+		}
+
+		let baseX = 0;
+		if (this.data.nodes.length > 0) {
+			let maxX = -Infinity;
+			for (const n of this.data.nodes) {
+				const s = this.nodeSize(n);
+				maxX = Math.max(maxX, n.x + s.w);
+			}
+			baseX = maxX + 240;
+		}
+		root.x = baseX;
+		root.y = 0;
+		for (const n of children) {
+			n.x = baseX + 360;
+			n.y = 0;
+		}
+		this.data.nodes.push(...parsed.nodes);
+
+		const tasks: Promise<void>[] = [];
+		for (const n of parsed.nodes) {
+			this.createNodeEl(n);
+			tasks.push(this.renderNode(n.id));
+		}
+		await Promise.all(tasks);
+
+		let cursor = 0;
+		for (const n of children) {
+			const el = this.nodeEls.get(n.id);
+			if (!el) continue;
+			n.y = cursor;
+			this.positionNode(n);
+			cursor += el.offsetHeight + 28;
+		}
+
+		this.select(root.id);
+		this.updateEdges();
+		this.scheduleSave();
+		this.fitView();
+		new Notice(`已导入 ${children.length} 个节点`);
 	}
 
 	// ---------- 视图变换 ----------

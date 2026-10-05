@@ -1,24 +1,37 @@
 import { App, Component, MarkdownRenderer, Modal, Setting } from 'obsidian';
 
+export interface FormulaEditOptions {
+	title?: string;
+	value: string;
+	/** latex=按 $$ 公式渲染预览；markdown=按 Markdown 渲染预览 */
+	mode: 'latex' | 'markdown';
+	onSubmit: (value: string) => void;
+}
+
 export class FormulaEditModal extends Modal {
 	private timer: number | null = null;
 	private previewEl!: HTMLElement;
 	private inputEl!: HTMLTextAreaElement;
-	// Modal 本身不是 Component，公式渲染需要一个挂载用的 Component
+	// Modal 本身不是 Component，渲染需要一个挂载用的 Component
 	private renderComponent = new Component();
+	private opts: FormulaEditOptions;
 
-	constructor(app: App, private latex: string, private onSubmit: (latex: string) => void) {
+	constructor(app: App, opts: FormulaEditOptions) {
 		super(app);
+		this.opts = opts;
 	}
 
 	onOpen() {
-		this.titleEl.setText('编辑公式');
+		this.titleEl.setText(this.opts.title ?? (this.opts.mode === 'latex' ? '编辑公式' : '编辑内容'));
 		this.contentEl.addClass('fmm-edit-modal');
 
 		const inputWrap = this.contentEl.createDiv('fmm-edit-input');
 		this.inputEl = inputWrap.createEl('textarea');
-		this.inputEl.value = this.latex;
-		this.inputEl.placeholder = '例如：\\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}';
+		this.inputEl.value = this.opts.value;
+		this.inputEl.placeholder =
+			this.opts.mode === 'latex'
+				? '例如：\\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}'
+				: '支持 Markdown 与 $行内公式$…';
 
 		const previewWrap = this.contentEl.createDiv('fmm-edit-preview');
 		previewWrap.createDiv('fmm-edit-preview-label').setText('预览');
@@ -50,22 +63,21 @@ export class FormulaEditModal extends Modal {
 			this.timer = null;
 			this.previewEl.empty();
 			const v = this.inputEl.value.trim();
-			if (!v) {
-				this.previewEl.setText('（空公式）');
+			const md = this.opts.mode === 'latex' ? (v ? '$$' + v + '$$' : '') : v;
+			if (!md) {
+				this.previewEl.setText('（空）');
 				this.previewEl.addClass('fmm-muted');
 				return;
 			}
 			this.previewEl.removeClass('fmm-muted');
-			MarkdownRenderer.render(this.app, '$$' + v + '$$', this.previewEl, '', this.renderComponent).catch(
-				() => {
-					this.previewEl.setText(v);
-				}
-			);
+			MarkdownRenderer.render(this.app, md, this.previewEl, '', this.renderComponent).catch(() => {
+				this.previewEl.setText(v);
+			});
 		}, 150);
 	}
 
 	private save() {
-		this.onSubmit(this.inputEl.value.trim());
+		this.opts.onSubmit(this.inputEl.value.trim());
 		this.close();
 	}
 

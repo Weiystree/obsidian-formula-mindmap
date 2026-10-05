@@ -2,6 +2,9 @@ import { MarkdownPostProcessorContext, Notice, Plugin, TFile, addIcon } from 'ob
 import { VIEW_TYPE_FMM, FormulaMindMapView } from './view';
 import { DEFAULT_DATA_JSON, extractBlock, replaceBlock } from './types';
 
+// 供外部（测试脚本等）使用解析器
+export { parseAIAnswer, CATEGORY_LABELS } from './parser';
+
 const FMM_ICON_ID = 'fmm-icon';
 const FMM_ICON_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="12" r="2.5"/><circle cx="18.5" cy="5.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/><path d="M8 10.8 16 6.4M8 13.2l8 4.4"/></svg>`;
 
@@ -26,6 +29,19 @@ export default class FormulaMindMapPlugin extends Plugin {
 			name: '打开当前笔记的公式思维导图（无则创建）',
 			callback: () => {
 				void this.openForActiveNote();
+			},
+		});
+
+		this.addCommand({
+			id: 'import-ai-answer',
+			name: '把 AI 回答导入当前公式思维导图',
+			callback: () => {
+				const view = this.app.workspace.getActiveViewOfType(FormulaMindMapView);
+				if (!view) {
+					new Notice('请先打开一张公式思维导图');
+					return;
+				}
+				view.openImportModal();
 			},
 		});
 

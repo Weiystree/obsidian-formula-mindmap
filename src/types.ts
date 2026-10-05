@@ -4,6 +4,18 @@ export interface FMMNode {
 	x: number;
 	y: number;
 	latex: string;
+	/** formula=公式（默认）、text=文字、group=可折叠分类框；老数据无此字段按 formula 处理 */
+	type?: 'formula' | 'text' | 'group';
+	/** text/group 的显示标题 */
+	label?: string;
+	/** text/group 的 Markdown 内容 */
+	body?: string;
+	/** group 的分类（proof/derivation/example/…），决定颜色 */
+	category?: string;
+	/** group 是否折叠 */
+	collapsed?: boolean;
+	/** 运行时标记：用户手动拖过的节点不参与自动排版 */
+	manuallyMoved?: boolean;
 }
 
 export interface FMMData {
@@ -33,7 +45,7 @@ export function emptyData(): FMMData {
 export const DEFAULT_DATA_JSON = JSON.stringify(emptyData());
 
 export function serializeData(data: FMMData): string {
-	return JSON.stringify(data);
+	return JSON.stringify(data, (key, value) => (key === 'manuallyMoved' ? undefined : value));
 }
 
 /** 解析代码块内容；非法时返回 null */
@@ -47,13 +59,21 @@ export function parseData(src: string): FMMData | null {
 			if (!n || typeof n.id !== 'string' || !n.id) continue;
 			if (seen.has(n.id)) continue;
 			seen.add(n.id);
-			nodes.push({
+			const node: FMMNode = {
 				id: n.id,
 				parent: typeof n.parent === 'string' && n.parent ? n.parent : null,
 				x: Number(n.x) || 0,
 				y: Number(n.y) || 0,
 				latex: typeof n.latex === 'string' ? n.latex : '',
-			});
+			};
+			if (typeof n.type === 'string' && ['formula', 'text', 'group'].includes(n.type)) {
+				node.type = n.type as FMMNode['type'];
+			}
+			if (typeof n.label === 'string' && n.label) node.label = n.label;
+			if (typeof n.body === 'string' && n.body) node.body = n.body;
+			if (typeof n.category === 'string' && n.category) node.category = n.category;
+			if (n.collapsed === true) node.collapsed = true;
+			nodes.push(node);
 		}
 		const ids = new Set(nodes.map((n) => n.id));
 		for (const n of nodes) if (n.parent && !ids.has(n.parent)) n.parent = null;

@@ -256,3 +256,179 @@
 .fmm-embed button {
 	margin-left: auto;
 }
+
+/* ===== 文字节点 ===== */
+
+.fmm-node.fmm-node-text {
+	max-width: 340px;
+	padding: 8px 12px;
+	font-size: 13px;
+}
+
+.fmm-node.fmm-node-text h1,
+.fmm-node.fmm-node-text h2,
+.fmm-node.fmm-node-text h3,
+.fmm-node.fmm-node-text h4,
+.fmm-node.fmm-node-text h5,
+.fmm-node.fmm-node-text h6 {
+	font-size: 14px;
+	margin: 0 0 2px;
+}
+
+.fmm-node.fmm-node-text p {
+	margin: 0 0 4px;
+}
+
+.fmm-node.fmm-node-text p:last-child {
+	margin-bottom: 0;
+}
+
+/* 导入的核心公式适当放大 */
+.fmm-node.fmm-big .fmm-node-content {
+	font-size: 125%;
+}
+
+/* ===== 分组节点（推导/证明/例子等折叠框） ===== */
+
+.fmm-node.fmm-node-group {
+	border-left-width: 4px;
+	padding-left: 12px;
+}
+
+.fmm-node.fmm-node-group .fmm-group-title {
+	font-weight: 600;
+	font-size: 13px;
+	margin-bottom: 2px;
+}
+
+.fmm-node.fmm-node-group .fmm-group-meta {
+	font-size: 11px;
+	color: var(--text-faint);
+}
+
+.fmm-node.fmm-node-group .fmm-group-body {
+	font-size: 12.5px;
+	max-width: 440px;
+}
+
+.fmm-node.fmm-node-group .fmm-group-body p {
+	margin: 0 0 6px;
+}
+
+.fmm-node.fmm-node-group .fmm-group-body p:last-child {
+	margin-bottom: 0;
+}
+
+.fmm-node.fmm-node-group .fmm-group-body .mjx-container {
+	margin: 4px 0 !important;
+}
+
+.fmm-node.fmm-node-group .fmm-group-body ul,
+.fmm-node.fmm-node-group .fmm-group-body ol {
+	margin: 4px 0;
+	padding-left: 18px;
+}
+
+.fmm-node.fmm-node-group .fmm-group-body pre {
+	font-size: 11px;
+	margin: 4px 0;
+}
+
+.fmm-node-collapse {
+	position: absolute;
+	top: -11px;
+	left: -11px;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 50%;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
+	color: var(--text-muted);
+	font-size: 11px;
+	line-height: 1;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.15s;
+	box-shadow: var(--shadow-s);
+}
+
+.fmm-node:hover .fmm-node-collapse {
+	opacity: 1;
+}
+
+/* 分类颜色 */
+.fmm-cat-proof {
+	border-left-color: var(--color-purple);
+}
+
+.fmm-cat-proof .fmm-group-title {
+	color: var(--color-purple);
+}
+
+.fmm-cat-derivation {
+	border-left-color: var(--color-blue);
+}
+
+.fmm-cat-derivation .fmm-group-title {
+	color: var(--color-blue);
+}
+
+.fmm-cat-example {
+	border-left-color: var(--color-orange);
+}
+
+.fmm-cat-example .fmm-group-title {
+	color: var(--color-orange);
+}
+
+.fmm-cat-theorem {
+	border-left-color: var(--color-red);
+}
+
+.fmm-cat-theorem .fmm-group-title {
+	color: var(--color-red);
+}
+
+.fmm-cat-definition {
+	border-left-color: var(--color-cyan);
+}
+
+.fmm-cat-definition .fmm-group-title {
+	color: var(--color-cyan);
+}
+
+.fmm-cat-note {
+	border-left-color: var(--color-gray, var(--text-muted));
+}
+
+.fmm-cat-note .fmm-group-title {
+	color: var(--color-gray, var(--text-muted));
+}
+
+.fmm-cat-code {
+	border-left-color: var(--color-green);
+}
+
+.fmm-cat-code .fmm-group-title {
+	color: var(--color-green);
+}
+
+/* ===== 导入弹窗 ===== */
+
+.fmm-import-hint {
+	color: var(--text-muted);
+	font-size: 12px;
+	margin: 0 0 8px;
+}
+
+.fmm-import-textarea {
+	width: 100%;
+	min-height: 220px;
+	resize: vertical;
+	font-family: var(--font-monospace);
+	font-size: 12px;
+}

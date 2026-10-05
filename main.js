@@ -23,13 +23,15 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/main.ts
 var main_exports = {};
 __export(main_exports, {
-  default: () => FormulaMindMapPlugin
+  CATEGORY_LABELS: () => CATEGORY_LABELS,
+  default: () => FormulaMindMapPlugin,
+  parseAIAnswer: () => parseAIAnswer
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/view.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/types.ts
 var DEFAULT_ROOT_LATEX = "\\text{\u4E2D\u5FC3\u4E3B\u9898}";
@@ -49,7 +51,7 @@ function emptyData() {
 }
 var DEFAULT_DATA_JSON = JSON.stringify(emptyData());
 function serializeData(data) {
-  return JSON.stringify(data);
+  return JSON.stringify(data, (key, value) => key === "manuallyMoved" ? void 0 : value);
 }
 function parseData(src) {
   try {
@@ -61,13 +63,21 @@ function parseData(src) {
       if (!n || typeof n.id !== "string" || !n.id) continue;
       if (seen.has(n.id)) continue;
       seen.add(n.id);
-      nodes.push({
+      const node = {
         id: n.id,
         parent: typeof n.parent === "string" && n.parent ? n.parent : null,
         x: Number(n.x) || 0,
         y: Number(n.y) || 0,
         latex: typeof n.latex === "string" ? n.latex : ""
-      });
+      };
+      if (typeof n.type === "string" && ["formula", "text", "group"].includes(n.type)) {
+        node.type = n.type;
+      }
+      if (typeof n.label === "string" && n.label) node.label = n.label;
+      if (typeof n.body === "string" && n.body) node.body = n.body;
+      if (typeof n.category === "string" && n.category) node.category = n.category;
+      if (n.collapsed === true) node.collapsed = true;
+      nodes.push(node);
     }
     const ids = new Set(nodes.map((n) => n.id));
     for (const n of nodes) if (n.parent && !ids.has(n.parent)) n.parent = null;
@@ -115,28 +125,330 @@ function descendantsOf(data, id) {
   return out;
 }
 
-// src/edit-modal.ts
+// src/parser.ts
+var CATEGORY_LABELS = {
+  proof: "\u8BC1\u660E",
+  derivation: "\u63A8\u5BFC",
+  example: "\u4F8B\u5B50",
+  theorem: "\u5B9A\u7406",
+  definition: "\u5B9A\u4E49",
+  note: "\u6CE8\u610F",
+  code: "\u4EE3\u7801"
+};
+var KEYWORD_RULES = [
+  { cat: "proof", re: /^(?:证明|证[:：]|proof\b|q\.?e\.?d\b)/i },
+  { cat: "derivation", re: /^(?:推导|推算|求解|解题|化简|计算过程|计算|derivation|solution\b)/i },
+  { cat: "example", re: /^(?:例子|例题|举例|例[\s\d：:.、(（]|example\b|e\.?g\.\s*[:：]?)/i },
+  { cat: "theorem", re: /^(?:定理|引理|命题|推论|theorem|lemma|proposition|corollary)/i },
+  { cat: "definition", re: /^(?:定义|definition)/i },
+  { cat: "note", re: /^(?:注意|提醒|备注|注[:：]|remark|note\b|caution|warning)/i },
+  { cat: "code", re: /^(?:代码|code)/i }
+];
+function normalizeDelimiters(src) {
+  return src.replace(/\\\(([\s\S]+?)\\\)/g, (_m, inner) => `$${inner}$`).replace(/\\\[([\s\S]+?)\\\]/g, (_m, inner) => `$$
+${inner}
+$$`);
+}
+function scanBlocks(src) {
+  const lines = src.split(/\r?\n/);
+  const blocks = [];
+  let buf = [];
+  let mode = "none";
+  let gapBefore = false;
+  const flushText = () => {
+    if (buf.join("").trim()) {
+      blocks.push({ kind: "text", text: buf.join("\n").trim(), gapBefore });
+      gapBefore = false;
+    }
+    buf = [];
+  };
+  for (const line of lines) {
+    if (mode === "code") {
+      buf.push(line);
+      if (line.trim().startsWith("```")) {
+        blocks.push({ kind: "code", text: buf.join("\n").trim(), gapBefore });
+        gapBefore = false;
+        buf = [];
+        mode = "none";
+      }
+      continue;
+    }
+    if (mode === "math") {
+      buf.push(line);
+      const joined = buf.join("\n").trim();
+      if (line.trim().endsWith("$$") && joined.length > 4) {
+        blocks.push({ kind: "math", text: joined, gapBefore });
+        gapBefore = false;
+        buf = [];
+        mode = "none";
+      }
+      continue;
+    }
+    const t = line.trim();
+    if (t.startsWith("```")) {
+      flushText();
+      mode = "code";
+      buf = [line];
+      continue;
+    }
+    if (t.startsWith("$$")) {
+      flushText();
+      const inner = t.slice(2, -2).trim();
+      if (t.endsWith("$$") && t.length > 4 && inner) {
+        blocks.push({ kind: "math", text: t, gapBefore });
+        gapBefore = false;
+      } else {
+        buf = [line];
+        mode = "math";
+      }
+      continue;
+    }
+    if (/^#{1,6}\s/.test(t)) {
+      flushText();
+      blocks.push({ kind: "heading", text: t, gapBefore });
+      gapBefore = false;
+      continue;
+    }
+    if (!t) {
+      flushText();
+      gapBefore = true;
+      continue;
+    }
+    buf.push(line);
+  }
+  flushText();
+  if (mode === "math" && buf.join("").trim()) {
+    blocks.push({ kind: "math", text: buf.join("\n").trim(), gapBefore });
+  }
+  if (mode === "code" && buf.join("").trim()) {
+    blocks.push({ kind: "code", text: buf.join("\n").trim(), gapBefore });
+  }
+  return blocks;
+}
+function cleanForDetect(line) {
+  return line.replace(/^#{1,6}\s*/, "").replace(/^\s*(?:[-*+]|\d+[.、)])\s+/, "").replace(/[*_`~>]/g, "").trim();
+}
+function detectCategory(text) {
+  var _a;
+  const line = cleanForDetect((_a = text.split(/\r?\n/)[0]) != null ? _a : "");
+  if (!line) return null;
+  for (const rule of KEYWORD_RULES) {
+    if (rule.re.test(line)) return rule.cat;
+  }
+  return null;
+}
+function truncate(s, n) {
+  var _a;
+  const line = ((_a = s.split(/\r?\n/)[0]) != null ? _a : "").trim();
+  return line.length > n ? line.slice(0, n) + "\u2026" : line;
+}
+function mathInner(blockText) {
+  let s = blockText.trim();
+  if (s.startsWith("$$")) s = s.slice(2);
+  if (s.endsWith("$$")) s = s.slice(0, -2);
+  return s.trim();
+}
+function makeGroup(label, cat, body, parentId) {
+  return {
+    id: genId(),
+    parent: parentId,
+    x: 0,
+    y: 0,
+    latex: "",
+    type: "group",
+    category: cat,
+    label,
+    body,
+    collapsed: true
+  };
+}
+function parseAIAnswer(raw) {
+  var _a;
+  const src = normalizeDelimiters((raw != null ? raw : "").trim());
+  if (!src) return null;
+  const blocks = scanBlocks(src);
+  let title = "";
+  let startIdx = 0;
+  if (blocks.length && blocks[0].kind === "heading" && /^#\s/.test(blocks[0].text)) {
+    title = blocks[0].text.replace(/^#\s*/, "");
+    startIdx = 1;
+  } else {
+    const firstTextIdx = blocks.findIndex((b) => b.kind === "text");
+    if (firstTextIdx >= 0) {
+      const b = blocks[firstTextIdx];
+      title = truncate(b.text, 40);
+      if (!b.text.includes("\n") && b.text.length <= 40) startIdx = firstTextIdx + 1;
+    }
+  }
+  if (!title) title = "AI \u56DE\u7B54";
+  const root = {
+    id: genId(),
+    parent: null,
+    x: 0,
+    y: 0,
+    latex: "",
+    type: "text",
+    label: title,
+    body: title
+  };
+  const nodes = [root];
+  let openGroup = null;
+  let lastWasContent = false;
+  const closeGroup = () => {
+    openGroup = null;
+    lastWasContent = false;
+  };
+  for (let i = startIdx; i < blocks.length; i++) {
+    const b = blocks[i];
+    if (b.kind === "heading") {
+      const label = b.text.replace(/^#{1,6}\s*/, "");
+      const level = ((_a = b.text.match(/^#+/)) != null ? _a : ["#"])[0].length;
+      const cat2 = detectCategory(b.text);
+      if (cat2) {
+        const g = makeGroup(label, cat2, "", root.id);
+        nodes.push(g);
+        openGroup = g;
+        lastWasContent = false;
+      } else if (level >= 3 && openGroup) {
+        openGroup.body = (openGroup.body ? openGroup.body + "\n\n" : "") + b.text;
+        lastWasContent = true;
+      } else {
+        closeGroup();
+        nodes.push({
+          id: genId(),
+          parent: root.id,
+          x: 0,
+          y: 0,
+          latex: "",
+          type: "text",
+          label: truncate(label, 60),
+          body: label
+        });
+      }
+      continue;
+    }
+    if (b.kind === "math") {
+      const inner = mathInner(b.text);
+      if (!inner) continue;
+      if (openGroup && lastWasContent && !b.gapBefore) {
+        openGroup.body = (openGroup.body ? openGroup.body + "\n\n" : "") + b.text;
+        continue;
+      }
+      closeGroup();
+      nodes.push({ id: genId(), parent: root.id, x: 0, y: 0, latex: inner, type: "formula" });
+      continue;
+    }
+    if (b.kind === "code") {
+      if (openGroup && !b.gapBefore) {
+        openGroup.body = (openGroup.body ? openGroup.body + "\n\n" : "") + b.text;
+        continue;
+      }
+      closeGroup();
+      const g = makeGroup(CATEGORY_LABELS.code, "code", b.text, root.id);
+      nodes.push(g);
+      openGroup = g;
+      lastWasContent = true;
+      continue;
+    }
+    const cat = detectCategory(b.text);
+    if (cat) {
+      const g = makeGroup(truncate(b.text, 30), cat, b.text, root.id);
+      nodes.push(g);
+      openGroup = g;
+      lastWasContent = true;
+      continue;
+    }
+    if (openGroup) {
+      openGroup.body = (openGroup.body ? openGroup.body + "\n\n" : "") + b.text;
+      lastWasContent = true;
+      continue;
+    }
+    nodes.push({
+      id: genId(),
+      parent: root.id,
+      x: 0,
+      y: 0,
+      latex: "",
+      type: "text",
+      label: truncate(b.text, 60),
+      body: b.text
+    });
+  }
+  if (nodes.length === 1) {
+    nodes.push(makeGroup("\u5185\u5BB9", "note", src, root.id));
+  }
+  return { rootId: root.id, nodes };
+}
+
+// src/import-modal.ts
 var import_obsidian = require("obsidian");
-var FormulaEditModal = class extends import_obsidian.Modal {
-  constructor(app, latex, onSubmit) {
+var ImportModal = class extends import_obsidian.Modal {
+  constructor(app, onSubmit) {
     super(app);
-    this.latex = latex;
     this.onSubmit = onSubmit;
-    this.timer = null;
-    // Modal 本身不是 Component，公式渲染需要一个挂载用的 Component
-    this.renderComponent = new import_obsidian.Component();
   }
   onOpen() {
-    this.titleEl.setText("\u7F16\u8F91\u516C\u5F0F");
+    this.titleEl.setText("\u5BFC\u5165 AI \u56DE\u7B54");
+    this.contentEl.addClass("fmm-import-modal");
+    this.contentEl.createEl("p", {
+      text: "\u628A GPT \u7B49 AI \u7684\u56DE\u7B54\u7C98\u8D34\u5230\u4E0B\u9762\uFF08\u652F\u6301 Markdown \u4E0E LaTeX\uFF09\uFF0C\u4F1A\u81EA\u52A8\u4FDD\u7559\u6838\u5FC3\u516C\u5F0F\uFF0C\u5E76\u628A\u63A8\u5BFC / \u8BC1\u660E / \u4F8B\u5B50\u7B49\u5185\u5BB9\u6298\u53E0\u6210\u4E0D\u540C\u989C\u8272\u7684\u5206\u7EC4\u6846\u3002"
+    }).addClass("fmm-import-hint");
+    const ta = this.contentEl.createEl("textarea");
+    ta.addClass("fmm-import-textarea");
+    ta.placeholder = "\u5728\u6B64\u7C98\u8D34\uFF08Ctrl+V\uFF09\u2026";
+    new import_obsidian.Setting(this.contentEl).addButton(
+      (b) => b.setButtonText("\u4ECE\u526A\u8D34\u677F\u8BFB\u53D6").onClick(async () => {
+        try {
+          const t = await navigator.clipboard.readText();
+          if (t && t.trim()) {
+            ta.value = t;
+          } else {
+            new import_obsidian.Notice("\u526A\u8D34\u677F\u662F\u7A7A\u7684");
+          }
+        } catch (e) {
+          new import_obsidian.Notice("\u65E0\u6CD5\u8BFB\u53D6\u526A\u8D34\u677F\uFF0C\u8BF7\u624B\u52A8\u7C98\u8D34");
+        }
+      })
+    ).addButton(
+      (b) => b.setCta().setButtonText("\u751F\u6210\u601D\u7EF4\u5BFC\u56FE").onClick(() => {
+        const v = ta.value.trim();
+        if (!v) {
+          new import_obsidian.Notice("\u5185\u5BB9\u4E3A\u7A7A");
+          return;
+        }
+        this.close();
+        this.onSubmit(v);
+      })
+    );
+    ta.focus();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+// src/edit-modal.ts
+var import_obsidian2 = require("obsidian");
+var FormulaEditModal = class extends import_obsidian2.Modal {
+  constructor(app, opts) {
+    super(app);
+    this.timer = null;
+    // Modal 本身不是 Component，渲染需要一个挂载用的 Component
+    this.renderComponent = new import_obsidian2.Component();
+    this.opts = opts;
+  }
+  onOpen() {
+    var _a;
+    this.titleEl.setText((_a = this.opts.title) != null ? _a : this.opts.mode === "latex" ? "\u7F16\u8F91\u516C\u5F0F" : "\u7F16\u8F91\u5185\u5BB9");
     this.contentEl.addClass("fmm-edit-modal");
     const inputWrap = this.contentEl.createDiv("fmm-edit-input");
     this.inputEl = inputWrap.createEl("textarea");
-    this.inputEl.value = this.latex;
-    this.inputEl.placeholder = "\u4F8B\u5982\uFF1A\\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}";
+    this.inputEl.value = this.opts.value;
+    this.inputEl.placeholder = this.opts.mode === "latex" ? "\u4F8B\u5982\uFF1A\\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}" : "\u652F\u6301 Markdown \u4E0E $\u884C\u5185\u516C\u5F0F$\u2026";
     const previewWrap = this.contentEl.createDiv("fmm-edit-preview");
     previewWrap.createDiv("fmm-edit-preview-label").setText("\u9884\u89C8");
     this.previewEl = previewWrap.createDiv("fmm-edit-preview-body");
-    new import_obsidian.Setting(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton((b) => b.setCta().setButtonText("\u4FDD\u5B58").onClick(() => this.save()));
+    new import_obsidian2.Setting(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton((b) => b.setCta().setButtonText("\u4FDD\u5B58").onClick(() => this.save()));
     this.inputEl.addEventListener("input", () => this.updatePreview());
     this.inputEl.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -156,21 +468,20 @@ var FormulaEditModal = class extends import_obsidian.Modal {
       this.timer = null;
       this.previewEl.empty();
       const v = this.inputEl.value.trim();
-      if (!v) {
-        this.previewEl.setText("\uFF08\u7A7A\u516C\u5F0F\uFF09");
+      const md = this.opts.mode === "latex" ? v ? "$$" + v + "$$" : "" : v;
+      if (!md) {
+        this.previewEl.setText("\uFF08\u7A7A\uFF09");
         this.previewEl.addClass("fmm-muted");
         return;
       }
       this.previewEl.removeClass("fmm-muted");
-      import_obsidian.MarkdownRenderer.render(this.app, "$$" + v + "$$", this.previewEl, "", this.renderComponent).catch(
-        () => {
-          this.previewEl.setText(v);
-        }
-      );
+      import_obsidian2.MarkdownRenderer.render(this.app, md, this.previewEl, "", this.renderComponent).catch(() => {
+        this.previewEl.setText(v);
+      });
     }, 150);
   }
   save() {
-    this.onSubmit(this.inputEl.value.trim());
+    this.opts.onSubmit(this.inputEl.value.trim());
     this.close();
   }
   onClose() {
@@ -179,13 +490,13 @@ var FormulaEditModal = class extends import_obsidian.Modal {
     this.renderComponent.unload();
   }
 };
-var ConfirmModal = class extends import_obsidian.Modal {
+var ConfirmModal = class extends import_obsidian2.Modal {
   constructor(app, title, message, confirmLabel, onConfirm) {
     super(app);
     this.onConfirm = onConfirm;
     this.titleEl.setText(title);
     this.contentEl.createEl("p", { text: message });
-    new import_obsidian.Setting(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton(
+    new import_obsidian2.Setting(this.contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton(
       (b) => b.setWarning().setButtonText(confirmLabel).onClick(() => {
         this.close();
         this.onConfirm();
@@ -199,7 +510,7 @@ var ConfirmModal = class extends import_obsidian.Modal {
 
 // src/view.ts
 var VIEW_TYPE_FMM = "formula-mindmap-view";
-var FormulaMindMapView = class extends import_obsidian2.ItemView {
+var FormulaMindMapView = class extends import_obsidian3.ItemView {
   constructor(leaf) {
     super(leaf);
     this.path = "";
@@ -218,7 +529,7 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
     this.onFileModify = async (file) => {
       if (file.path !== this.path || this.dirty || this.gesture) return;
       const f = this.app.vault.getAbstractFileByPath(this.path);
-      if (!(f instanceof import_obsidian2.TFile)) return;
+      if (!(f instanceof import_obsidian3.TFile)) return;
       const text = await this.app.vault.cachedRead(f);
       const block = extractBlock(text);
       const parsed = block ? parseData(block) : null;
@@ -314,7 +625,11 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
         el.removeClass("fmm-dragging");
         el.style.pointerEvents = "";
       }
-      if (g.moved) this.scheduleSave();
+      if (g.moved) {
+        const dragged = this.data.nodes.find((n) => n.id === g.id);
+        if (dragged) dragged.manuallyMoved = true;
+        this.scheduleSave();
+      }
       if (this.dropTargetId) {
         const target = this.dropTargetId;
         this.clearDropTarget();
@@ -324,7 +639,7 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
             node.parent = target;
             this.updateEdges();
             this.scheduleSave();
-            new import_obsidian2.Notice("\u5DF2\u8C03\u6574\u7236\u5B50\u5173\u7CFB");
+            new import_obsidian3.Notice("\u5DF2\u8C03\u6574\u7236\u5B50\u5173\u7CFB");
           }
         }
       } else {
@@ -337,13 +652,20 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
       this.clearDropTarget();
     };
     this.onDblClick = (e) => {
+      var _a;
       const target = e.target;
       if (!target || typeof target.closest !== "function") return;
       if (target.closest(".fmm-zoom")) return;
       e.preventDefault();
       const nodeEl = target.closest(".fmm-node");
       if (nodeEl == null ? void 0 : nodeEl.dataset.id) {
-        this.openEditor(nodeEl.dataset.id);
+        const id = nodeEl.dataset.id;
+        const node2 = this.data.nodes.find((n) => n.id === id);
+        if (node2 && ((_a = node2.type) != null ? _a : "formula") === "group") {
+          void this.toggleGroup(id);
+          return;
+        }
+        this.openEditor(id);
         return;
       }
       const { x, y } = this.screenToWorld(e.clientX, e.clientY);
@@ -351,22 +673,30 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
       this.data.nodes.push(node);
       this.createNodeEl(node);
       this.select(node.id);
-      void this.renderLatex(node.id, node.latex);
+      void this.renderNode(node.id);
       this.updateEdges();
       this.scheduleSave();
       this.openEditor(node.id);
     };
     this.onContextMenu = (e) => {
+      var _a;
       e.preventDefault();
       const target = e.target;
       if (!target || typeof target.closest !== "function") return;
-      const menu = new import_obsidian2.Menu();
+      const menu = new import_obsidian3.Menu();
       const nodeEl = target.closest(".fmm-node");
       if (nodeEl == null ? void 0 : nodeEl.dataset.id) {
         const id = nodeEl.dataset.id;
+        const node = this.data.nodes.find((n) => n.id === id);
+        const type = (_a = node == null ? void 0 : node.type) != null ? _a : "formula";
         menu.addItem(
-          (item) => item.setTitle("\u7F16\u8F91\u516C\u5F0F").setIcon("pencil").onClick(() => this.openEditor(id))
+          (item) => item.setTitle(type === "formula" ? "\u7F16\u8F91\u516C\u5F0F" : "\u7F16\u8F91\u5185\u5BB9").setIcon("pencil").onClick(() => this.openEditor(id))
         );
+        if (type === "group") {
+          menu.addItem(
+            (item) => item.setTitle((node == null ? void 0 : node.collapsed) ? "\u5C55\u5F00" : "\u6536\u8D77").setIcon((node == null ? void 0 : node.collapsed) ? "chevrons-down-up" : "chevrons-up-down").onClick(() => void this.toggleGroup(id))
+          );
+        }
         menu.addItem(
           (item) => item.setTitle("\u6DFB\u52A0\u5B50\u8282\u70B9").setIcon("plus").onClick(() => this.addChildNode(id))
         );
@@ -382,7 +712,7 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
             this.data.nodes.push(node);
             this.createNodeEl(node);
             this.select(node.id);
-            void this.renderLatex(node.id, node.latex);
+            void this.renderNode(node.id);
             this.updateEdges();
             this.scheduleSave();
             this.openEditor(node.id);
@@ -400,6 +730,15 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
       this.zoomAt(e.clientX, e.clientY, factor);
     };
     this.onKeyDown = (e) => {
+      var _a;
+      if ((e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V")) {
+        e.preventDefault();
+        (_a = navigator.clipboard) == null ? void 0 : _a.readText().then((t) => {
+          if (t && t.trim()) void this.importAnswer(t);
+          else new import_obsidian3.Notice("\u526A\u8D34\u677F\u662F\u7A7A\u7684");
+        }).catch(() => new import_obsidian3.Notice("\u65E0\u6CD5\u8BFB\u53D6\u526A\u8D34\u677F\uFF0C\u8BF7\u7528\u53F3\u4E0B\u89D2\u300C\u5BFC\u5165\u300D\u6309\u94AE\u7C98\u8D34"));
+        return;
+      }
       if ((e.key === "Delete" || e.key === "Backspace") && this.selectedId) {
         e.preventDefault();
         this.deleteNode(this.selectedId);
@@ -453,9 +792,12 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
     btnIn.setAttribute("aria-label", "\u653E\u5927");
     const btnFit = zoom.createEl("button", { text: "\u2922" });
     btnFit.setAttribute("aria-label", "\u9002\u5E94\u89C6\u56FE");
+    const btnImport = zoom.createEl("button", { text: "\u2913 \u5BFC\u5165" });
+    btnImport.setAttribute("aria-label", "\u5BFC\u5165 AI \u56DE\u7B54\uFF08\u7C98\u8D34\u540E\u81EA\u52A8\u751F\u6210\u5BFC\u56FE\uFF09");
     btnOut.addEventListener("click", () => this.zoomBy(1 / 1.2));
     btnIn.addEventListener("click", () => this.zoomBy(1.2));
     btnFit.addEventListener("click", () => this.fitView());
+    btnImport.addEventListener("click", () => this.openImportModal());
     this.registerDomEvent(this.canvasEl, "pointerdown", this.onPointerDown);
     this.registerDomEvent(this.canvasEl, "pointermove", this.onPointerMove);
     this.registerDomEvent(this.canvasEl, "pointerup", this.onPointerUp);
@@ -473,7 +815,7 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (file.path === this.path) {
-          new import_obsidian2.Notice("\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE\uFF1A\u7B14\u8BB0\u5DF2\u88AB\u5220\u9664");
+          new import_obsidian3.Notice("\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE\uFF1A\u7B14\u8BB0\u5DF2\u88AB\u5220\u9664");
           this.leaf.detach();
         }
       })
@@ -500,7 +842,7 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
   // ---------- 数据 ----------
   async loadDataFromNote() {
     const file = this.app.vault.getAbstractFileByPath(this.path);
-    if (file instanceof import_obsidian2.TFile) {
+    if (file instanceof import_obsidian3.TFile) {
       const text = await this.app.vault.cachedRead(file);
       const block = extractBlock(text);
       const parsed = block ? parseData(block) : null;
@@ -520,7 +862,7 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
   async saveNow() {
     this.dirty = false;
     const file = this.app.vault.getAbstractFileByPath(this.path);
-    if (!(file instanceof import_obsidian2.TFile)) return;
+    if (!(file instanceof import_obsidian3.TFile)) return;
     const json = serializeData(this.data);
     await this.app.vault.process(file, (text) => replaceBlock(text, json));
   }
@@ -531,50 +873,98 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
     const tasks = [];
     for (const node of this.data.nodes) {
       this.createNodeEl(node);
-      tasks.push(this.renderLatex(node.id, node.latex));
+      tasks.push(this.renderNode(node.id));
     }
     await Promise.all(tasks);
     this.updateEdges();
   }
   createNodeEl(node) {
+    var _a;
     const el = this.worldEl.createDiv("fmm-node");
     el.dataset.id = node.id;
+    const type = (_a = node.type) != null ? _a : "formula";
+    el.addClass(
+      type === "group" ? "fmm-node-group" : type === "text" ? "fmm-node-text" : "fmm-node-formula"
+    );
+    if (type === "group" && node.category) el.addClass("fmm-cat-" + node.category);
     el.createDiv("fmm-node-content");
+    if (type === "group") {
+      const col = el.createEl("button", { text: node.collapsed ? "\u25B8" : "\u25BE" });
+      col.addClass("fmm-node-collapse");
+      col.setAttribute("aria-label", node.collapsed ? "\u5C55\u5F00" : "\u6536\u8D77");
+      col.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void this.toggleGroup(node.id);
+      });
+    }
     const addBtn = el.createEl("button", { text: "+" });
     addBtn.addClass("fmm-node-add");
     addBtn.setAttribute("aria-label", "\u6DFB\u52A0\u5B50\u8282\u70B9");
     addBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (node.parent === null && !this.data.nodes.find((n) => n.id === node.id)) return;
       this.addChildNode(node.id);
     });
     this.nodeEls.set(node.id, el);
     this.positionNode(node);
     return el;
   }
-  async renderLatex(id, latex) {
-    var _a;
+  async renderNode(id) {
+    var _a, _b, _c, _d, _e, _f;
     const el = this.nodeEls.get(id);
-    if (!el) return;
+    const node = this.data.nodes.find((n) => n.id === id);
+    if (!el || !node) return;
     const token = ((_a = this.renderTokens.get(id)) != null ? _a : 0) + 1;
     this.renderTokens.set(id, token);
     const content = el.querySelector(".fmm-node-content");
     if (!content) return;
     content.empty();
-    content.removeClass("fmm-muted");
-    content.removeClass("fmm-raw");
-    const src = latex.trim();
-    if (!src) {
-      content.setText("\uFF08\u53CC\u51FB\u8F93\u5165\u516C\u5F0F\uFF09");
-      content.addClass("fmm-muted");
-      this.scheduleEdges();
-      return;
-    }
-    try {
-      await import_obsidian2.MarkdownRenderer.render(this.app, "$$" + src + "$$", content, this.path, this);
-    } catch (e) {
-      content.setText(src);
-      content.addClass("fmm-raw");
+    const type = (_b = node.type) != null ? _b : "formula";
+    if (type === "group") {
+      const title = content.createDiv("fmm-group-title");
+      title.setText(node.label || CATEGORY_LABELS[node.category] || "\u5206\u7EC4");
+      if (node.collapsed) {
+        const paras = ((_c = node.body) != null ? _c : "").split(/\n{2,}/).filter((s) => s.trim()).length;
+        content.createDiv("fmm-group-meta").setText(`${paras} \u6BB5\u5185\u5BB9 \xB7 \u53CC\u51FB\u5C55\u5F00`);
+      } else {
+        const bodyEl = content.createDiv("fmm-group-body");
+        const body = ((_d = node.body) != null ? _d : "").trim();
+        if (!body) {
+          bodyEl.addClass("fmm-muted");
+          bodyEl.setText("\uFF08\u7A7A\uFF09");
+        } else {
+          try {
+            await import_obsidian3.MarkdownRenderer.render(this.app, body, bodyEl, this.path, this);
+          } catch (e) {
+            bodyEl.setText(body);
+          }
+        }
+      }
+    } else if (type === "text") {
+      const body = ((_f = (_e = node.body) != null ? _e : node.label) != null ? _f : "").trim();
+      if (!body) {
+        content.setText("\uFF08\u7A7A\uFF09");
+        content.addClass("fmm-muted");
+      } else {
+        try {
+          await import_obsidian3.MarkdownRenderer.render(this.app, body, content, this.path, this);
+        } catch (e) {
+          content.setText(body);
+        }
+      }
+    } else {
+      const src = node.latex.trim();
+      if (!src) {
+        content.setText("\uFF08\u53CC\u51FB\u8F93\u5165\u516C\u5F0F\uFF09");
+        content.addClass("fmm-muted");
+        this.scheduleEdges();
+        return;
+      }
+      try {
+        await import_obsidian3.MarkdownRenderer.render(this.app, "$$" + src + "$$", content, this.path, this);
+      } catch (e) {
+        content.setText(src);
+        content.addClass("fmm-raw");
+      }
     }
     if (this.renderTokens.get(id) !== token) return;
     this.scheduleEdges();
@@ -665,12 +1055,24 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
     this.updateEdges();
   }
   openEditor(id) {
+    var _a, _b;
     const node = this.data.nodes.find((n) => n.id === id);
     if (!node) return;
-    new FormulaEditModal(this.app, node.latex, (latex) => {
-      node.latex = latex;
-      void this.renderLatex(id, latex);
-      this.scheduleSave();
+    const type = (_a = node.type) != null ? _a : "formula";
+    new FormulaEditModal(this.app, {
+      title: type === "formula" ? "\u7F16\u8F91\u516C\u5F0F" : type === "text" ? "\u7F16\u8F91\u6587\u5B57\u5185\u5BB9" : "\u7F16\u8F91\u5206\u7EC4\u5185\u5BB9",
+      mode: type === "formula" ? "latex" : "markdown",
+      value: type === "formula" ? node.latex : (_b = node.body) != null ? _b : "",
+      onSubmit: (v) => {
+        if (type === "formula") {
+          node.latex = v;
+        } else {
+          node.body = v;
+          if (v) node.label = v.split(/\r?\n/)[0].slice(0, 60);
+        }
+        void this.renderNode(id);
+        this.scheduleSave();
+      }
     }).open();
   }
   addChildNode(parentId) {
@@ -688,7 +1090,7 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
     this.data.nodes.push(node);
     this.createNodeEl(node);
     this.select(node.id);
-    void this.renderLatex(node.id, node.latex);
+    void this.renderNode(node.id);
     this.updateEdges();
     this.scheduleSave();
     this.openEditor(node.id);
@@ -716,12 +1118,94 @@ var FormulaMindMapView = class extends import_obsidian2.ItemView {
           const root = emptyData().nodes[0];
           this.data.nodes.push(root);
           this.createNodeEl(root);
-          void this.renderLatex(root.id, root.latex);
+          void this.renderNode(root.id);
         }
         this.updateEdges();
         this.scheduleSave();
       }
     ).open();
+  }
+  // ---------- 导入与分组 ----------
+  openImportModal() {
+    new ImportModal(this.app, (text) => void this.importAnswer(text)).open();
+  }
+  async toggleGroup(id) {
+    var _a;
+    const node = this.data.nodes.find((n) => n.id === id);
+    const el = this.nodeEls.get(id);
+    if (!node || !el || ((_a = node.type) != null ? _a : "formula") !== "group") return;
+    const oldH = el.offsetHeight;
+    node.collapsed = !node.collapsed;
+    const col = el.querySelector(".fmm-node-collapse");
+    if (col) {
+      col.textContent = node.collapsed ? "\u25B8" : "\u25BE";
+      col.setAttribute("aria-label", node.collapsed ? "\u5C55\u5F00" : "\u6536\u8D77");
+    }
+    await this.renderNode(id);
+    const delta = el.offsetHeight - oldH;
+    if (delta !== 0) {
+      for (const n of this.data.nodes) {
+        if (n.id === id || n.manuallyMoved) continue;
+        if (Math.abs(n.x - node.x) > 2) continue;
+        if (n.y <= node.y) continue;
+        n.y += delta;
+        this.positionNode(n);
+      }
+    }
+    this.scheduleEdges();
+    this.scheduleSave();
+  }
+  async importAnswer(text) {
+    var _a;
+    const parsed = parseAIAnswer(text);
+    if (!parsed) {
+      new import_obsidian3.Notice("\u6CA1\u6709\u89E3\u6790\u51FA\u5185\u5BB9");
+      return;
+    }
+    const root = parsed.nodes[0];
+    const children = parsed.nodes.slice(1);
+    if (this.data.nodes.length === 1 && this.data.nodes[0].latex === DEFAULT_ROOT_LATEX && !this.data.nodes[0].manuallyMoved) {
+      const old = this.data.nodes[0];
+      (_a = this.nodeEls.get(old.id)) == null ? void 0 : _a.remove();
+      this.nodeEls.delete(old.id);
+      this.renderTokens.delete(old.id);
+      this.data.nodes = [];
+    }
+    let baseX = 0;
+    if (this.data.nodes.length > 0) {
+      let maxX = -Infinity;
+      for (const n of this.data.nodes) {
+        const s = this.nodeSize(n);
+        maxX = Math.max(maxX, n.x + s.w);
+      }
+      baseX = maxX + 240;
+    }
+    root.x = baseX;
+    root.y = 0;
+    for (const n of children) {
+      n.x = baseX + 360;
+      n.y = 0;
+    }
+    this.data.nodes.push(...parsed.nodes);
+    const tasks = [];
+    for (const n of parsed.nodes) {
+      this.createNodeEl(n);
+      tasks.push(this.renderNode(n.id));
+    }
+    await Promise.all(tasks);
+    let cursor = 0;
+    for (const n of children) {
+      const el = this.nodeEls.get(n.id);
+      if (!el) continue;
+      n.y = cursor;
+      this.positionNode(n);
+      cursor += el.offsetHeight + 28;
+    }
+    this.select(root.id);
+    this.updateEdges();
+    this.scheduleSave();
+    this.fitView();
+    new import_obsidian3.Notice(`\u5DF2\u5BFC\u5165 ${children.length} \u4E2A\u8282\u70B9`);
   }
   // ---------- 视图变换 ----------
   screenToWorld(clientX, clientY) {
@@ -781,9 +1265,9 @@ var DEFAULT_NOTE_NAME = "\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE.md";
 function blockFromJson(json) {
   return "```fmm\n" + json + "\n```";
 }
-var FormulaMindMapPlugin = class extends import_obsidian3.Plugin {
+var FormulaMindMapPlugin = class extends import_obsidian4.Plugin {
   async onload() {
-    (0, import_obsidian3.addIcon)(FMM_ICON_ID, FMM_ICON_SVG);
+    (0, import_obsidian4.addIcon)(FMM_ICON_ID, FMM_ICON_SVG);
     this.registerView(VIEW_TYPE_FMM, (leaf) => new FormulaMindMapView(leaf));
     this.registerMarkdownCodeBlockProcessor("fmm", (source, el, ctx) => {
       this.renderEmbedHint(el, ctx.sourcePath);
@@ -793,6 +1277,18 @@ var FormulaMindMapPlugin = class extends import_obsidian3.Plugin {
       name: "\u6253\u5F00\u5F53\u524D\u7B14\u8BB0\u7684\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE\uFF08\u65E0\u5219\u521B\u5EFA\uFF09",
       callback: () => {
         void this.openForActiveNote();
+      }
+    });
+    this.addCommand({
+      id: "import-ai-answer",
+      name: "\u628A AI \u56DE\u7B54\u5BFC\u5165\u5F53\u524D\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE",
+      callback: () => {
+        const view = this.app.workspace.getActiveViewOfType(FormulaMindMapView);
+        if (!view) {
+          new import_obsidian4.Notice("\u8BF7\u5148\u6253\u5F00\u4E00\u5F20\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE");
+          return;
+        }
+        view.openImportModal();
       }
     });
     this.addRibbonIcon(FMM_ICON_ID, "\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE", () => {
@@ -825,7 +1321,7 @@ var FormulaMindMapPlugin = class extends import_obsidian3.Plugin {
   }
   async findOrCreateDefaultNote() {
     const existing = this.app.vault.getAbstractFileByPath(DEFAULT_NOTE_NAME);
-    if (existing instanceof import_obsidian3.TFile) return existing.path;
+    if (existing instanceof import_obsidian4.TFile) return existing.path;
     try {
       await this.app.vault.create(DEFAULT_NOTE_NAME, blockFromJson(DEFAULT_DATA_JSON));
     } catch (e) {
@@ -835,7 +1331,7 @@ var FormulaMindMapPlugin = class extends import_obsidian3.Plugin {
   /** 确保笔记中存在 fmm 数据块（没有就追加模板），返回笔记文件 */
   async ensureMapNote(path) {
     let file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof import_obsidian3.TFile)) {
+    if (!(file instanceof import_obsidian4.TFile)) {
       const idx = path.lastIndexOf("/");
       if (idx > 0) await this.ensureFolder(path.slice(0, idx));
       return await this.app.vault.create(path, blockFromJson(DEFAULT_DATA_JSON));
@@ -868,7 +1364,7 @@ var FormulaMindMapPlugin = class extends import_obsidian3.Plugin {
     }
     const leaf = workspace.getLeaf(true);
     await leaf.setViewState({ type: VIEW_TYPE_FMM, state: { path }, active: true });
-    new import_obsidian3.Notice("\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE\u5DF2\u6253\u5F00", 1500);
+    new import_obsidian4.Notice("\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE\u5DF2\u6253\u5F00", 1500);
     workspace.revealLeaf(leaf);
   }
 };
