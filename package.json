@@ -1,6 +1,6 @@
 {
   "name": "obsidian-formula-mindmap",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Free-dragging mind map whose nodes are LaTeX formulas, for Obsidian.",
   "main": "main.js",
   "scripts": {

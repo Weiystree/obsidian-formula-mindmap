@@ -64,6 +64,7 @@
 	border-radius: 12px;
 	box-shadow: var(--shadow-s);
 	cursor: grab;
+	box-sizing: border-box;
 }
 
 .fmm-node:hover {
@@ -358,6 +359,38 @@
 
 .fmm-node:hover .fmm-node-collapse {
 	opacity: 1;
+}
+
+/* 宽度调节把手（节点右边缘） */
+.fmm-node-resize {
+	position: absolute;
+	top: 0;
+	right: -8px;
+	bottom: 0;
+	width: 16px;
+	cursor: ew-resize;
+	opacity: 0;
+	transition: opacity 0.15s;
+}
+
+.fmm-node-resize::after {
+	content: '';
+	position: absolute;
+	top: 50%;
+	right: 3px;
+	transform: translateY(-50%);
+	width: 3.5px;
+	height: 20px;
+	border-radius: 2px;
+	background: var(--background-modifier-border-hover);
+}
+
+.fmm-node:hover .fmm-node-resize {
+	opacity: 1;
+}
+
+.fmm-node.fmm-dragging .fmm-node-resize {
+	opacity: 0;
 }
 
 /* 分类颜色 */

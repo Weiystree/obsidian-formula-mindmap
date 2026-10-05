@@ -44,6 +44,13 @@ type Gesture =
 			startTx: number;
 			startTy: number;
 			moved: boolean;
+	  }
+	| {
+			kind: 'resize';
+			id: string;
+			startClientX: number;
+			startW: number;
+			oldH: number;
 	  };
 
 export class FormulaMindMapView extends ItemView {
@@ -240,7 +247,13 @@ export class FormulaMindMapView extends ItemView {
 			type === 'group' ? 'fmm-node-group' : type === 'text' ? 'fmm-node-text' : 'fmm-node-formula'
 		);
 		if (type === 'group' && node.category) el.addClass('fmm-cat-' + node.category);
+		if (node.w && node.w > 0) {
+			el.style.width = node.w + 'px';
+			el.style.maxWidth = 'none';
+		}
 		el.createDiv('fmm-node-content');
+		const grip = el.createDiv('fmm-node-resize');
+		grip.setAttribute('aria-label', '拖动调整节点宽度');
 		if (type === 'group') {
 			const col = el.createEl('button', { text: node.collapsed ? '▸' : '▾' });
 			col.addClass('fmm-node-collapse');
@@ -384,7 +397,7 @@ export class FormulaMindMapView extends ItemView {
 		if (e.button !== 0) return;
 		const target = e.target as HTMLElement | null;
 		if (!target || typeof target.closest !== 'function') return;
-		if (target.closest('.fmm-zoom') || target.closest('.fmm-node-add')) return;
+		if (target.closest('.fmm-zoom')) return;
 		this.canvasEl.focus({ preventScroll: true });
 
 		const nodeEl = target.closest('.fmm-node') as HTMLElement | null;
@@ -392,6 +405,23 @@ export class FormulaMindMapView extends ItemView {
 			const id = nodeEl.dataset.id;
 			const node = this.data.nodes.find((n) => n.id === id);
 			if (!node) return;
+			if (target.closest('.fmm-node-add')) return;
+			if (target.closest('.fmm-node-resize')) {
+				this.select(id);
+				this.gesture = {
+					kind: 'resize',
+					id,
+					startClientX: e.clientX,
+					startW: node.w ?? nodeEl.offsetWidth,
+					oldH: nodeEl.offsetHeight,
+				};
+				try {
+					this.canvasEl.setPointerCapture(e.pointerId);
+				} catch (err) {
+					/* ignore */
+				}
+				return;
+			}
 			this.select(id);
 			this.gesture = {
 				kind: 'drag',
@@ -424,6 +454,17 @@ export class FormulaMindMapView extends ItemView {
 		const g = this.gesture;
 		if (!g) return;
 		const dxScreen = e.clientX - g.startClientX;
+		if (g.kind === 'resize') {
+			const node = this.data.nodes.find((n) => n.id === g.id);
+			const el = this.nodeEls.get(g.id);
+			if (!node || !el) return;
+			const w = Math.round(Math.min(2000, Math.max(60, g.startW + dxScreen / this.scale)));
+			node.w = w;
+			el.style.width = w + 'px';
+			el.style.maxWidth = 'none';
+			this.scheduleEdges();
+			return;
+		}
 		const dyScreen = e.clientY - g.startClientY;
 		if (!g.moved && Math.abs(dxScreen) + Math.abs(dyScreen) > 3) {
 			g.moved = true;
@@ -463,6 +504,16 @@ export class FormulaMindMapView extends ItemView {
 		}
 		if (g.kind === 'pan') {
 			if (!g.moved) this.select(null);
+			return;
+		}
+		if (g.kind === 'resize') {
+			const node = this.data.nodes.find((n) => n.id === g.id);
+			const el = this.nodeEls.get(g.id);
+			if (node && el) {
+				this.shiftColumnBelow(g.id, el.offsetHeight - g.oldH);
+				node.manuallyMoved = true;
+				this.scheduleSave();
+			}
 			return;
 		}
 		const el = this.nodeEls.get(g.id);
@@ -573,6 +624,20 @@ export class FormulaMindMapView extends ItemView {
 						.setTitle(node?.collapsed ? '展开' : '收起')
 						.setIcon(node?.collapsed ? 'chevrons-down-up' : 'chevrons-up-down')
 						.onClick(() => void this.toggleGroup(id))
+				);
+			}
+			if (node?.w) {
+				menu.addItem((item) =>
+					item.setTitle('恢复自动宽度').setIcon('rotate-ccw').onClick(() => {
+						delete node.w;
+						const el = this.nodeEls.get(id);
+						if (el) {
+							el.style.width = '';
+							el.style.maxWidth = '';
+						}
+						this.scheduleEdges();
+						this.scheduleSave();
+					})
 				);
 			}
 			menu.addItem((item) =>
@@ -736,17 +801,23 @@ export class FormulaMindMapView extends ItemView {
 		}
 		await this.renderNode(id);
 		const delta = el.offsetHeight - oldH;
-		if (delta !== 0) {
-			for (const n of this.data.nodes) {
-				if (n.id === id || n.manuallyMoved) continue;
-				if (Math.abs(n.x - node.x) > 2) continue;
-				if (n.y <= node.y) continue;
-				n.y += delta;
-				this.positionNode(n);
-			}
-		}
+		this.shiftColumnBelow(id, delta);
 		this.scheduleEdges();
 		this.scheduleSave();
+	}
+
+	/** 节点高度变化（折叠/展开、调宽换行）后，把同列下方未手动挪过的节点顺移 */
+	private shiftColumnBelow(anchorId: string, delta: number): void {
+		if (!delta) return;
+		const anchor = this.data.nodes.find((n) => n.id === anchorId);
+		if (!anchor) return;
+		for (const n of this.data.nodes) {
+			if (n.id === anchorId || n.manuallyMoved) continue;
+			if (Math.abs(n.x - anchor.x) > 2) continue;
+			if (n.y <= anchor.y) continue;
+			n.y += delta;
+			this.positionNode(n);
+		}
 	}
 
 	async importAnswer(text: string): Promise<void> {

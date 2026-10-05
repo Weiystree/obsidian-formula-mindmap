@@ -77,6 +77,7 @@ function parseData(src) {
       if (typeof n.body === "string" && n.body) node.body = n.body;
       if (typeof n.category === "string" && n.category) node.category = n.category;
       if (n.collapsed === true) node.collapsed = true;
+      if (typeof n.w === "number" && Number.isFinite(n.w) && n.w > 0) node.w = Math.round(n.w);
       nodes.push(node);
     }
     const ids = new Set(nodes.map((n) => n.id));
@@ -541,16 +542,33 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     };
     // ---------- 交互 ----------
     this.onPointerDown = (e) => {
+      var _a;
       if (e.button !== 0) return;
       const target = e.target;
       if (!target || typeof target.closest !== "function") return;
-      if (target.closest(".fmm-zoom") || target.closest(".fmm-node-add")) return;
+      if (target.closest(".fmm-zoom")) return;
       this.canvasEl.focus({ preventScroll: true });
       const nodeEl = target.closest(".fmm-node");
       if (nodeEl == null ? void 0 : nodeEl.dataset.id) {
         const id = nodeEl.dataset.id;
         const node = this.data.nodes.find((n) => n.id === id);
         if (!node) return;
+        if (target.closest(".fmm-node-add")) return;
+        if (target.closest(".fmm-node-resize")) {
+          this.select(id);
+          this.gesture = {
+            kind: "resize",
+            id,
+            startClientX: e.clientX,
+            startW: (_a = node.w) != null ? _a : nodeEl.offsetWidth,
+            oldH: nodeEl.offsetHeight
+          };
+          try {
+            this.canvasEl.setPointerCapture(e.pointerId);
+          } catch (err) {
+          }
+          return;
+        }
         this.select(id);
         this.gesture = {
           kind: "drag",
@@ -581,6 +599,17 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       const g = this.gesture;
       if (!g) return;
       const dxScreen = e.clientX - g.startClientX;
+      if (g.kind === "resize") {
+        const node = this.data.nodes.find((n) => n.id === g.id);
+        const el = this.nodeEls.get(g.id);
+        if (!node || !el) return;
+        const w = Math.round(Math.min(2e3, Math.max(60, g.startW + dxScreen / this.scale)));
+        node.w = w;
+        el.style.width = w + "px";
+        el.style.maxWidth = "none";
+        this.scheduleEdges();
+        return;
+      }
       const dyScreen = e.clientY - g.startClientY;
       if (!g.moved && Math.abs(dxScreen) + Math.abs(dyScreen) > 3) {
         g.moved = true;
@@ -618,6 +647,16 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       }
       if (g.kind === "pan") {
         if (!g.moved) this.select(null);
+        return;
+      }
+      if (g.kind === "resize") {
+        const node = this.data.nodes.find((n) => n.id === g.id);
+        const el2 = this.nodeEls.get(g.id);
+        if (node && el2) {
+          this.shiftColumnBelow(g.id, el2.offsetHeight - g.oldH);
+          node.manuallyMoved = true;
+          this.scheduleSave();
+        }
         return;
       }
       const el = this.nodeEls.get(g.id);
@@ -695,6 +734,20 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
         if (type === "group") {
           menu.addItem(
             (item) => item.setTitle((node == null ? void 0 : node.collapsed) ? "\u5C55\u5F00" : "\u6536\u8D77").setIcon((node == null ? void 0 : node.collapsed) ? "chevrons-down-up" : "chevrons-up-down").onClick(() => void this.toggleGroup(id))
+          );
+        }
+        if (node == null ? void 0 : node.w) {
+          menu.addItem(
+            (item) => item.setTitle("\u6062\u590D\u81EA\u52A8\u5BBD\u5EA6").setIcon("rotate-ccw").onClick(() => {
+              delete node.w;
+              const el = this.nodeEls.get(id);
+              if (el) {
+                el.style.width = "";
+                el.style.maxWidth = "";
+              }
+              this.scheduleEdges();
+              this.scheduleSave();
+            })
           );
         }
         menu.addItem(
@@ -887,7 +940,13 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       type === "group" ? "fmm-node-group" : type === "text" ? "fmm-node-text" : "fmm-node-formula"
     );
     if (type === "group" && node.category) el.addClass("fmm-cat-" + node.category);
+    if (node.w && node.w > 0) {
+      el.style.width = node.w + "px";
+      el.style.maxWidth = "none";
+    }
     el.createDiv("fmm-node-content");
+    const grip = el.createDiv("fmm-node-resize");
+    grip.setAttribute("aria-label", "\u62D6\u52A8\u8C03\u6574\u8282\u70B9\u5BBD\u5EA6");
     if (type === "group") {
       const col = el.createEl("button", { text: node.collapsed ? "\u25B8" : "\u25BE" });
       col.addClass("fmm-node-collapse");
@@ -1143,17 +1202,22 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     }
     await this.renderNode(id);
     const delta = el.offsetHeight - oldH;
-    if (delta !== 0) {
-      for (const n of this.data.nodes) {
-        if (n.id === id || n.manuallyMoved) continue;
-        if (Math.abs(n.x - node.x) > 2) continue;
-        if (n.y <= node.y) continue;
-        n.y += delta;
-        this.positionNode(n);
-      }
-    }
+    this.shiftColumnBelow(id, delta);
     this.scheduleEdges();
     this.scheduleSave();
+  }
+  /** 节点高度变化（折叠/展开、调宽换行）后，把同列下方未手动挪过的节点顺移 */
+  shiftColumnBelow(anchorId, delta) {
+    if (!delta) return;
+    const anchor = this.data.nodes.find((n) => n.id === anchorId);
+    if (!anchor) return;
+    for (const n of this.data.nodes) {
+      if (n.id === anchorId || n.manuallyMoved) continue;
+      if (Math.abs(n.x - anchor.x) > 2) continue;
+      if (n.y <= anchor.y) continue;
+      n.y += delta;
+      this.positionNode(n);
+    }
   }
   async importAnswer(text) {
     var _a;

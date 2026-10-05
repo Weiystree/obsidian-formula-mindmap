@@ -14,6 +14,8 @@ export interface FMMNode {
 	category?: string;
 	/** group 是否折叠 */
 	collapsed?: boolean;
+	/** 手动设定的节点宽度（px）；未设置时按内容自适应 */
+	w?: number;
 	/** 运行时标记：用户手动拖过的节点不参与自动排版 */
 	manuallyMoved?: boolean;
 }
@@ -73,6 +75,7 @@ export function parseData(src: string): FMMData | null {
 			if (typeof n.body === 'string' && n.body) node.body = n.body;
 			if (typeof n.category === 'string' && n.category) node.category = n.category;
 			if (n.collapsed === true) node.collapsed = true;
+			if (typeof n.w === 'number' && Number.isFinite(n.w) && n.w > 0) node.w = Math.round(n.w);
 			nodes.push(node);
 		}
 		const ids = new Set(nodes.map((n) => n.id));
