@@ -15,10 +15,16 @@ function blockFromJson(json: string): string {
 }
 
 export default class FormulaMindMapPlugin extends Plugin {
+	/** 上次使用的导入方式，存在 data.json 里，跨重启记忆 */
+	importMode: 'auto' | 'single' = 'auto';
+
 	async onload(): Promise<void> {
+		const saved = await this.loadData();
+		if (saved && saved.importMode === 'single') this.importMode = 'single';
+
 		addIcon(FMM_ICON_ID, FMM_ICON_SVG);
 
-		this.registerView(VIEW_TYPE_FMM, (leaf) => new FormulaMindMapView(leaf));
+		this.registerView(VIEW_TYPE_FMM, (leaf) => new FormulaMindMapView(leaf, this));
 
 		this.registerMarkdownCodeBlockProcessor('fmm', (source, el, ctx) => {
 			this.renderEmbedHint(el, ctx.sourcePath);
@@ -48,6 +54,11 @@ export default class FormulaMindMapPlugin extends Plugin {
 		this.addRibbonIcon(FMM_ICON_ID, '公式思维导图', () => {
 			void this.openForActiveNote();
 		});
+	}
+
+	async setImportMode(mode: 'auto' | 'single'): Promise<void> {
+		this.importMode = mode;
+		await this.saveData({ importMode: mode });
 	}
 
 	private renderEmbedHint(el: HTMLElement, sourcePath: string): void {

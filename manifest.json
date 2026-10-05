@@ -1,7 +1,7 @@
 {
 	"id": "formula-mindmap",
 	"name": "Formula Mind Map",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"minAppVersion": "1.4.0",
 	"description": "可自由拖拽节点、以 LaTeX 公式为内容的思维导图。Free-dragging mind map whose nodes are LaTeX formulas.",
 	"author": "Weiyushan",

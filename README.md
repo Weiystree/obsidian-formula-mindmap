@@ -3,7 +3,7 @@
 一个 Obsidian 插件：画布上的每个节点都可以**自由拖拽**，节点内容是渲染好的 **LaTeX 公式**，节点之间以思维导图的父子关系连线；还能**把 AI（GPT 等）的回答粘贴进来，自动整理成结构化导图**。
 
 - GitHub 仓库：<https://github.com/Weiystree/obsidian-formula-mindmap>
-- 插件 ID：`formula-mindmap` ｜ 版本：`0.2.1` ｜ 最低要求 Obsidian `1.4.0`
+- 插件 ID：`formula-mindmap` ｜ 版本：`0.2.2` ｜ 最低要求 Obsidian `1.4.0`
 - 本地开发目录：`C:\Users\Weiyushan\.zcode\workspace\default\formula-mindmap`
 
 ---

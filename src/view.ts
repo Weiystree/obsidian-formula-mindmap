@@ -22,8 +22,9 @@ import {
 	serializeData,
 } from './types';
 import { CATEGORY_LABELS, FMMCategory, parseAIAnswer } from './parser';
-import { ImportModal } from './import-modal';
+import { ImportMode, ImportModal } from './import-modal';
 import { ConfirmModal, FormulaEditModal } from './edit-modal';
+import type FormulaMindMapPlugin from './main';
 
 export const VIEW_TYPE_FMM = 'formula-mindmap-view';
 
@@ -73,7 +74,7 @@ export class FormulaMindMapView extends ItemView {
 	private dirty = false;
 	private edgesScheduled = false;
 
-	constructor(leaf: WorkspaceLeaf) {
+	constructor(leaf: WorkspaceLeaf, private plugin: FormulaMindMapPlugin) {
 		super(leaf);
 	}
 
@@ -680,7 +681,7 @@ export class FormulaMindMapView extends ItemView {
 			navigator.clipboard
 				?.readText()
 				.then((t) => {
-					if (t && t.trim()) void this.importAnswer(t);
+					if (t && t.trim()) void this.importAnswer(t, this.plugin.importMode);
 					else new Notice('剪贴板是空的');
 				})
 				.catch(() => new Notice('无法读取剪贴板，请用右下角「导入」按钮粘贴'));
@@ -785,7 +786,10 @@ export class FormulaMindMapView extends ItemView {
 	// ---------- 导入与分组 ----------
 
 	openImportModal(): void {
-		new ImportModal(this.app, (text) => void this.importAnswer(text)).open();
+		new ImportModal(this.app, this.plugin.importMode, (text, mode: ImportMode) => {
+			if (mode !== this.plugin.importMode) void this.plugin.setImportMode(mode);
+			void this.importAnswer(text, mode);
+		}).open();
 	}
 
 	private async toggleGroup(id: string): Promise<void> {
@@ -820,14 +824,12 @@ export class FormulaMindMapView extends ItemView {
 		}
 	}
 
-	async importAnswer(text: string): Promise<void> {
-		const parsed = parseAIAnswer(text);
-		if (!parsed) {
-			new Notice('没有解析出内容');
+	async importAnswer(text: string, mode: 'auto' | 'single' = 'auto'): Promise<void> {
+		const trimmed = (text ?? '').trim();
+		if (!trimmed) {
+			new Notice('内容为空');
 			return;
 		}
-		const root = parsed.nodes[0];
-		const children = parsed.nodes.slice(1);
 
 		// 空白默认图（只有未动过的默认根节点）直接替换
 		if (
@@ -851,6 +853,38 @@ export class FormulaMindMapView extends ItemView {
 			}
 			baseX = maxX + 240;
 		}
+
+		if (mode === 'single') {
+			// 整段作为一个节点：不拆分，全部内容算一条信息
+			const node: FMMNode = {
+				id: genId(),
+				parent: null,
+				x: baseX,
+				y: 0,
+				latex: '',
+				type: 'text',
+				label: trimmed.split(/\r?\n/)[0].slice(0, 50),
+				body: trimmed,
+				w: 520,
+			};
+			this.data.nodes.push(node);
+			this.createNodeEl(node);
+			await this.renderNode(node.id);
+			this.select(node.id);
+			this.updateEdges();
+			this.scheduleSave();
+			this.fitView();
+			new Notice('已作为单个节点导入');
+			return;
+		}
+
+		const parsed = parseAIAnswer(trimmed);
+		if (!parsed) {
+			new Notice('没有解析出内容');
+			return;
+		}
+		const root = parsed.nodes[0];
+		const children = parsed.nodes.slice(1);
 		root.x = baseX;
 		root.y = 0;
 		for (const n of children) {

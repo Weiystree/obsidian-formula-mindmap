@@ -384,19 +384,23 @@ function parseAIAnswer(raw) {
 // src/import-modal.ts
 var import_obsidian = require("obsidian");
 var ImportModal = class extends import_obsidian.Modal {
-  constructor(app, onSubmit) {
+  constructor(app, mode, onSubmit) {
     super(app);
+    this.mode = mode;
     this.onSubmit = onSubmit;
   }
   onOpen() {
     this.titleEl.setText("\u5BFC\u5165 AI \u56DE\u7B54");
     this.contentEl.addClass("fmm-import-modal");
-    this.contentEl.createEl("p", {
-      text: "\u628A GPT \u7B49 AI \u7684\u56DE\u7B54\u7C98\u8D34\u5230\u4E0B\u9762\uFF08\u652F\u6301 Markdown \u4E0E LaTeX\uFF09\uFF0C\u4F1A\u81EA\u52A8\u4FDD\u7559\u6838\u5FC3\u516C\u5F0F\uFF0C\u5E76\u628A\u63A8\u5BFC / \u8BC1\u660E / \u4F8B\u5B50\u7B49\u5185\u5BB9\u6298\u53E0\u6210\u4E0D\u540C\u989C\u8272\u7684\u5206\u7EC4\u6846\u3002"
-    }).addClass("fmm-import-hint");
+    this.contentEl.createEl("p", { text: "\u628A GPT \u7B49 AI \u7684\u56DE\u7B54\u7C98\u8D34\u5230\u4E0B\u9762\uFF08\u652F\u6301 Markdown \u4E0E LaTeX\uFF09\u3002" }).addClass("fmm-import-hint");
     const ta = this.contentEl.createEl("textarea");
     ta.addClass("fmm-import-textarea");
     ta.placeholder = "\u5728\u6B64\u7C98\u8D34\uFF08Ctrl+V\uFF09\u2026";
+    new import_obsidian.Setting(this.contentEl).setName("\u5BFC\u5165\u65B9\u5F0F").setDesc("\u81EA\u52A8\u62C6\u5206\uFF1A\u6838\u5FC3\u516C\u5F0F\u7559\u6210\u8282\u70B9\uFF0C\u63A8\u5BFC/\u8BC1\u660E/\u4F8B\u5B50\u6298\u53E0\u6210\u5F69\u8272\u5206\u7EC4\u6846\u3002\u6574\u6BB5\u5BFC\u5165\uFF1A\u5168\u90E8\u5185\u5BB9\u7B97\u4E00\u6761\u4FE1\u606F\uFF0C\u4E0D\u62C6\u5206\u3002").addDropdown(
+      (d) => d.addOption("auto", "\u81EA\u52A8\u62C6\u5206\uFF08\u63A8\u8350\uFF09").addOption("single", "\u6574\u6BB5\u4F5C\u4E3A\u4E00\u4E2A\u8282\u70B9\uFF08\u4E0D\u62C6\u5206\uFF09").setValue(this.mode).onChange((v) => {
+        this.mode = v;
+      })
+    );
     new import_obsidian.Setting(this.contentEl).addButton(
       (b) => b.setButtonText("\u4ECE\u526A\u8D34\u677F\u8BFB\u53D6").onClick(async () => {
         try {
@@ -418,7 +422,7 @@ var ImportModal = class extends import_obsidian.Modal {
           return;
         }
         this.close();
-        this.onSubmit(v);
+        this.onSubmit(v, this.mode);
       })
     );
     ta.focus();
@@ -512,8 +516,9 @@ var ConfirmModal = class extends import_obsidian2.Modal {
 // src/view.ts
 var VIEW_TYPE_FMM = "formula-mindmap-view";
 var FormulaMindMapView = class extends import_obsidian3.ItemView {
-  constructor(leaf) {
+  constructor(leaf, plugin) {
     super(leaf);
+    this.plugin = plugin;
     this.path = "";
     this.data = { version: 1, nodes: [] };
     this.nodeEls = /* @__PURE__ */ new Map();
@@ -787,7 +792,7 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       if ((e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V")) {
         e.preventDefault();
         (_a = navigator.clipboard) == null ? void 0 : _a.readText().then((t) => {
-          if (t && t.trim()) void this.importAnswer(t);
+          if (t && t.trim()) void this.importAnswer(t, this.plugin.importMode);
           else new import_obsidian3.Notice("\u526A\u8D34\u677F\u662F\u7A7A\u7684");
         }).catch(() => new import_obsidian3.Notice("\u65E0\u6CD5\u8BFB\u53D6\u526A\u8D34\u677F\uFF0C\u8BF7\u7528\u53F3\u4E0B\u89D2\u300C\u5BFC\u5165\u300D\u6309\u94AE\u7C98\u8D34"));
         return;
@@ -1186,7 +1191,10 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
   }
   // ---------- 导入与分组 ----------
   openImportModal() {
-    new ImportModal(this.app, (text) => void this.importAnswer(text)).open();
+    new ImportModal(this.app, this.plugin.importMode, (text, mode) => {
+      if (mode !== this.plugin.importMode) void this.plugin.setImportMode(mode);
+      void this.importAnswer(text, mode);
+    }).open();
   }
   async toggleGroup(id) {
     var _a;
@@ -1219,15 +1227,13 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       this.positionNode(n);
     }
   }
-  async importAnswer(text) {
+  async importAnswer(text, mode = "auto") {
     var _a;
-    const parsed = parseAIAnswer(text);
-    if (!parsed) {
-      new import_obsidian3.Notice("\u6CA1\u6709\u89E3\u6790\u51FA\u5185\u5BB9");
+    const trimmed = (text != null ? text : "").trim();
+    if (!trimmed) {
+      new import_obsidian3.Notice("\u5185\u5BB9\u4E3A\u7A7A");
       return;
     }
-    const root = parsed.nodes[0];
-    const children = parsed.nodes.slice(1);
     if (this.data.nodes.length === 1 && this.data.nodes[0].latex === DEFAULT_ROOT_LATEX && !this.data.nodes[0].manuallyMoved) {
       const old = this.data.nodes[0];
       (_a = this.nodeEls.get(old.id)) == null ? void 0 : _a.remove();
@@ -1244,6 +1250,35 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       }
       baseX = maxX + 240;
     }
+    if (mode === "single") {
+      const node = {
+        id: genId(),
+        parent: null,
+        x: baseX,
+        y: 0,
+        latex: "",
+        type: "text",
+        label: trimmed.split(/\r?\n/)[0].slice(0, 50),
+        body: trimmed,
+        w: 520
+      };
+      this.data.nodes.push(node);
+      this.createNodeEl(node);
+      await this.renderNode(node.id);
+      this.select(node.id);
+      this.updateEdges();
+      this.scheduleSave();
+      this.fitView();
+      new import_obsidian3.Notice("\u5DF2\u4F5C\u4E3A\u5355\u4E2A\u8282\u70B9\u5BFC\u5165");
+      return;
+    }
+    const parsed = parseAIAnswer(trimmed);
+    if (!parsed) {
+      new import_obsidian3.Notice("\u6CA1\u6709\u89E3\u6790\u51FA\u5185\u5BB9");
+      return;
+    }
+    const root = parsed.nodes[0];
+    const children = parsed.nodes.slice(1);
     root.x = baseX;
     root.y = 0;
     for (const n of children) {
@@ -1330,9 +1365,16 @@ function blockFromJson(json) {
   return "```fmm\n" + json + "\n```";
 }
 var FormulaMindMapPlugin = class extends import_obsidian4.Plugin {
+  constructor() {
+    super(...arguments);
+    /** 上次使用的导入方式，存在 data.json 里，跨重启记忆 */
+    this.importMode = "auto";
+  }
   async onload() {
+    const saved = await this.loadData();
+    if (saved && saved.importMode === "single") this.importMode = "single";
     (0, import_obsidian4.addIcon)(FMM_ICON_ID, FMM_ICON_SVG);
-    this.registerView(VIEW_TYPE_FMM, (leaf) => new FormulaMindMapView(leaf));
+    this.registerView(VIEW_TYPE_FMM, (leaf) => new FormulaMindMapView(leaf, this));
     this.registerMarkdownCodeBlockProcessor("fmm", (source, el, ctx) => {
       this.renderEmbedHint(el, ctx.sourcePath);
     });
@@ -1358,6 +1400,10 @@ var FormulaMindMapPlugin = class extends import_obsidian4.Plugin {
     this.addRibbonIcon(FMM_ICON_ID, "\u516C\u5F0F\u601D\u7EF4\u5BFC\u56FE", () => {
       void this.openForActiveNote();
     });
+  }
+  async setImportMode(mode) {
+    this.importMode = mode;
+    await this.saveData({ importMode: mode });
   }
   renderEmbedHint(el, sourcePath) {
     el.empty();
