@@ -1,0 +1,258 @@
+/* ===== 公式思维导图视图 ===== */
+
+.fmm-view-content {
+	padding: 0 !important;
+	overflow: hidden;
+}
+
+.fmm-canvas {
+	position: relative;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
+	outline: none;
+	user-select: none;
+	touch-action: none;
+	background-color: var(--background-secondary);
+	background-image: radial-gradient(var(--background-modifier-border-hover) 1px, transparent 1px);
+	background-size: 24px 24px;
+	background-position: 0 0;
+}
+
+.fmm-canvas.fmm-panning {
+	cursor: grabbing;
+}
+
+.fmm-world {
+	position: absolute;
+	left: 0;
+	top: 0;
+	transform-origin: 0 0;
+}
+
+.fmm-edges {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 1px;
+	height: 1px;
+	overflow: visible;
+	transform-origin: 0 0;
+	pointer-events: none;
+}
+
+.fmm-edges path {
+	fill: none;
+	stroke: var(--interactive-accent);
+	stroke-width: 2;
+	stroke-opacity: 0.5;
+	transition: stroke-opacity 0.15s;
+}
+
+.fmm-edges path.fmm-edge-selected {
+	stroke-opacity: 1;
+	stroke-width: 2.5;
+}
+
+.fmm-node {
+	position: absolute;
+	display: inline-block;
+	max-width: 460px;
+	padding: 10px 16px;
+	background: var(--background-primary);
+	border: 1.5px solid var(--background-modifier-border);
+	border-radius: 12px;
+	box-shadow: var(--shadow-s);
+	cursor: grab;
+}
+
+.fmm-node:hover {
+	border-color: var(--background-modifier-border-hover);
+}
+
+.fmm-node.fmm-selected {
+	border-color: var(--interactive-accent);
+	box-shadow:
+		0 0 0 3px hsla(var(--interactive-accent-hsl), 0.2),
+		var(--shadow-s);
+}
+
+.fmm-node.fmm-dragging {
+	cursor: grabbing;
+	box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+	z-index: 10;
+}
+
+.fmm-node.fmm-drop-target {
+	border-color: var(--color-green) !important;
+	box-shadow: 0 0 0 3px hsla(var(--color-green-hsl), 0.3);
+}
+
+.fmm-node-content {
+	line-height: 1.6;
+}
+
+.fmm-node-content p {
+	margin: 0 !important;
+}
+
+.fmm-node-content .mjx-container {
+	margin: 0 !important;
+}
+
+.fmm-node-content.fmm-muted {
+	color: var(--text-faint);
+	font-size: 13px;
+}
+
+.fmm-node-content.fmm-raw {
+	font-family: var(--font-monospace);
+	font-size: 13px;
+	white-space: pre-wrap;
+}
+
+.fmm-node-add {
+	position: absolute;
+	top: -11px;
+	right: -11px;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 50%;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.15s;
+	box-shadow: var(--shadow-s);
+}
+
+.fmm-node:hover .fmm-node-add {
+	opacity: 1;
+}
+
+.fmm-hint {
+	position: absolute;
+	left: 12px;
+	bottom: 12px;
+	max-width: 62%;
+	padding: 6px 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	background: var(--background-primary);
+	color: var(--text-muted);
+	font-size: 12px;
+	opacity: 0.85;
+	pointer-events: none;
+}
+
+.fmm-zoom {
+	position: absolute;
+	right: 12px;
+	bottom: 12px;
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 3px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	background: var(--background-primary);
+	box-shadow: var(--shadow-s);
+}
+
+.fmm-zoom button {
+	min-width: 26px;
+	height: 24px;
+	padding: 0 6px;
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	color: var(--text-muted);
+	cursor: pointer;
+	font-size: 14px;
+}
+
+.fmm-zoom button:hover {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.fmm-zoom-label {
+	min-width: 44px;
+	text-align: center;
+	font-size: 12px;
+	color: var(--text-muted);
+}
+
+/* ===== 公式编辑弹窗 ===== */
+
+.fmm-edit-modal textarea {
+	width: 100%;
+	min-height: 90px;
+	resize: vertical;
+	font-family: var(--font-monospace);
+}
+
+.fmm-edit-preview {
+	margin-top: 12px;
+	border: 1px dashed var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 12px;
+	min-height: 56px;
+	background: var(--background-secondary);
+}
+
+.fmm-edit-preview-label {
+	font-size: 12px;
+	color: var(--text-muted);
+	margin-bottom: 6px;
+}
+
+.fmm-edit-preview-body .mjx-container,
+.fmm-edit-preview-body p {
+	margin: 0 !important;
+}
+
+.fmm-muted {
+	color: var(--text-faint);
+	font-size: 13px;
+}
+
+/* ===== Markdown 内代码块提示 ===== */
+
+.fmm-embed {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 12px 16px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-secondary);
+	margin: 8px 0;
+}
+
+.fmm-embed-icon svg {
+	width: 28px;
+	height: 28px;
+	color: var(--interactive-accent);
+}
+
+.fmm-embed-title {
+	font-weight: 600;
+}
+
+.fmm-embed-desc {
+	font-size: 12px;
+	color: var(--text-muted);
+	margin-top: 2px;
+}
+
+.fmm-embed button {
+	margin-left: auto;
+}
