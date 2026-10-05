@@ -21,7 +21,7 @@ import {
 	replaceBlock,
 	serializeData,
 } from './types';
-import { CATEGORY_LABELS, FMMCategory, parseAIAnswer } from './parser';
+import { CATEGORY_LABELS, FMMCategory, parseAIAnswer, suggestTextWidth } from './parser';
 import { ImportMode, ImportModal } from './import-modal';
 import { ConfirmModal, FormulaEditModal } from './edit-modal';
 import type FormulaMindMapPlugin from './main';
@@ -34,9 +34,8 @@ type Gesture =
 			id: string;
 			startClientX: number;
 			startClientY: number;
-			startX: number;
-			startY: number;
 			moved: boolean;
+			snapshot: Array<{ id: string; x: number; y: number }>;
 	  }
 	| {
 			kind: 'pan';
@@ -69,7 +68,9 @@ export class FormulaMindMapView extends ItemView {
 	private ty = 0;
 	private gesture: Gesture | null = null;
 	private dropTargetId: string | null = null;
-	private selectedId: string | null = null;
+	private selectedIds = new Set<string>();
+	private primaryId: string | null = null;
+	private visibleIds = new Set<string>();
 	private saveTimer: number | null = null;
 	private dirty = false;
 	private edgesScheduled = false;
@@ -205,7 +206,7 @@ export class FormulaMindMapView extends ItemView {
 		if (!parsed) return;
 		if (serializeData(parsed) === serializeData(this.data)) return;
 		this.data = parsed;
-		this.selectedId = null;
+		this.clearSelection();
 		await this.renderAll();
 	};
 
@@ -237,7 +238,19 @@ export class FormulaMindMapView extends ItemView {
 			tasks.push(this.renderNode(node.id));
 		}
 		await Promise.all(tasks);
-		this.updateEdges();
+		this.applyVisibility();
+	}
+
+	private ensureCollapseButton(node: FMMNode): void {
+		const el = this.nodeEls.get(node.id);
+		if (!el || el.querySelector('.fmm-node-collapse')) return;
+		const col = el.createEl('button', { text: node.collapsed ? '▸' : '▾' });
+		col.addClass('fmm-node-collapse');
+		col.setAttribute('aria-label', node.collapsed ? '展开' : '收起');
+		col.addEventListener('click', (e) => {
+			e.stopPropagation();
+			void this.toggleCollapse(node.id);
+		});
 	}
 
 	private createNodeEl(node: FMMNode): HTMLElement {
@@ -253,17 +266,9 @@ export class FormulaMindMapView extends ItemView {
 			el.style.maxWidth = 'none';
 		}
 		el.createDiv('fmm-node-content');
+		if (type === 'group') this.ensureCollapseButton(node);
 		const grip = el.createDiv('fmm-node-resize');
 		grip.setAttribute('aria-label', '拖动调整节点宽度');
-		if (type === 'group') {
-			const col = el.createEl('button', { text: node.collapsed ? '▸' : '▾' });
-			col.addClass('fmm-node-collapse');
-			col.setAttribute('aria-label', node.collapsed ? '展开' : '收起');
-			col.addEventListener('click', (e) => {
-				e.stopPropagation();
-				void this.toggleGroup(node.id);
-			});
-		}
 		const addBtn = el.createEl('button', { text: '+' });
 		addBtn.addClass('fmm-node-add');
 		addBtn.setAttribute('aria-label', '添加子节点');
@@ -289,9 +294,13 @@ export class FormulaMindMapView extends ItemView {
 		if (type === 'group') {
 			const title = content.createDiv('fmm-group-title');
 			title.setText(node.label || CATEGORY_LABELS[node.category as FMMCategory] || '分组');
+			const childCount = this.data.nodes.filter((n) => n.parent === id).length;
 			if (node.collapsed) {
-				const paras = (node.body ?? '').split(/\n{2,}/).filter((s) => s.trim()).length;
-				content.createDiv('fmm-group-meta').setText(`${paras} 段内容 · 双击展开`);
+				const paras =
+					childCount || (node.body ?? '').split(/\n{2,}/).filter((s) => s.trim()).length;
+				content.createDiv('fmm-group-meta').setText(`${paras} 条内容 · 双击展开`);
+			} else if (childCount) {
+				content.createDiv('fmm-group-meta').setText('双击收起');
 			} else {
 				const bodyEl = content.createDiv('fmm-group-body');
 				const body = (node.body ?? '').trim();
@@ -365,8 +374,9 @@ export class FormulaMindMapView extends ItemView {
 		const NS = 'http://www.w3.org/2000/svg';
 		for (const node of this.data.nodes) {
 			if (!node.parent) continue;
+			if (!this.visibleIds.has(node.id)) continue;
 			const parent = this.data.nodes.find((n) => n.id === node.parent);
-			if (!parent) continue;
+			if (!parent || !this.visibleIds.has(parent.id)) continue;
 			const ps = this.nodeSize(parent);
 			const cs = this.nodeSize(node);
 			const x1 = parent.x + ps.w / 2;
@@ -376,11 +386,35 @@ export class FormulaMindMapView extends ItemView {
 			const dx = (x2 - x1) / 2;
 			const path = document.createElementNS(NS, 'path');
 			path.setAttribute('d', `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`);
-			if (node.id === this.selectedId || node.parent === this.selectedId) {
+			if (this.selectedIds.has(node.id) || (node.parent && this.selectedIds.has(node.parent))) {
 				path.classList.add('fmm-edge-selected');
 			}
 			svg.appendChild(path);
 		}
+	}
+
+	private applyVisibility(): void {
+		const visible = new Set<string>();
+		const childrenOf = new Map<string, FMMNode[]>();
+		for (const n of this.data.nodes) {
+			if (!n.parent) continue;
+			const list = childrenOf.get(n.parent) ?? [];
+			list.push(n);
+			childrenOf.set(n.parent, list);
+		}
+		const walk = (n: FMMNode): void => {
+			visible.add(n.id);
+			if (n.collapsed) return;
+			for (const child of childrenOf.get(n.id) ?? []) walk(child);
+		};
+		for (const n of this.data.nodes) {
+			if (!n.parent) walk(n);
+		}
+		this.visibleIds = visible;
+		for (const [id, el] of this.nodeEls) {
+			el.style.display = visible.has(id) ? '' : 'none';
+		}
+		this.updateEdges();
 	}
 
 	private applyTransform(): void {
@@ -407,8 +441,25 @@ export class FormulaMindMapView extends ItemView {
 			const node = this.data.nodes.find((n) => n.id === id);
 			if (!node) return;
 			if (target.closest('.fmm-node-add')) return;
+			if (e.shiftKey || e.ctrlKey || e.metaKey) {
+				this.toggleSelect(id);
+				return;
+			}
+			this.selectSingle(id);
+			// 拖动时连同整个子树（多选时连同所有选中节点的子树）一起移动
+			const dragIds = new Set<string>([id, ...descendantsOf(this.data, id).map((n) => n.id)]);
+			if (this.selectedIds.has(id) && this.selectedIds.size > 1) {
+				for (const sid of this.selectedIds) {
+					dragIds.add(sid);
+					for (const d of descendantsOf(this.data, sid)) dragIds.add(d.id);
+				}
+			}
+			const snapshot: Array<{ id: string; x: number; y: number }> = [];
+			for (const did of dragIds) {
+				const n = this.data.nodes.find((m) => m.id === did);
+				if (n) snapshot.push({ id: did, x: n.x, y: n.y });
+			}
 			if (target.closest('.fmm-node-resize')) {
-				this.select(id);
 				this.gesture = {
 					kind: 'resize',
 					id,
@@ -416,23 +467,16 @@ export class FormulaMindMapView extends ItemView {
 					startW: node.w ?? nodeEl.offsetWidth,
 					oldH: nodeEl.offsetHeight,
 				};
-				try {
-					this.canvasEl.setPointerCapture(e.pointerId);
-				} catch (err) {
-					/* ignore */
-				}
-				return;
+			} else {
+				this.gesture = {
+					kind: 'drag',
+					id,
+					startClientX: e.clientX,
+					startClientY: e.clientY,
+					moved: false,
+					snapshot,
+				};
 			}
-			this.select(id);
-			this.gesture = {
-				kind: 'drag',
-				id,
-				startClientX: e.clientX,
-				startClientY: e.clientY,
-				startX: node.x,
-				startY: node.y,
-				moved: false,
-			};
 		} else {
 			this.gesture = {
 				kind: 'pan',
@@ -483,11 +527,15 @@ export class FormulaMindMapView extends ItemView {
 			this.ty = g.startTy + dyScreen;
 			this.applyTransform();
 		} else {
-			const node = this.data.nodes.find((n) => n.id === g.id);
-			if (!node) return;
-			node.x = g.startX + dxScreen / this.scale;
-			node.y = g.startY + dyScreen / this.scale;
-			this.positionNode(node);
+			const dxw = dxScreen / this.scale;
+			const dyw = dyScreen / this.scale;
+			for (const s of g.snapshot) {
+				const n = this.data.nodes.find((m) => m.id === s.id);
+				if (!n) continue;
+				n.x = s.x + dxw;
+				n.y = s.y + dyw;
+				this.positionNode(n);
+			}
 			this.scheduleEdges();
 			this.updateDropTarget(g.id, e);
 		}
@@ -504,7 +552,7 @@ export class FormulaMindMapView extends ItemView {
 			/* ignore */
 		}
 		if (g.kind === 'pan') {
-			if (!g.moved) this.select(null);
+			if (!g.moved) this.clearSelection();
 			return;
 		}
 		if (g.kind === 'resize') {
@@ -523,8 +571,10 @@ export class FormulaMindMapView extends ItemView {
 			el.style.pointerEvents = '';
 		}
 		if (g.moved) {
-			const dragged = this.data.nodes.find((n) => n.id === g.id);
-			if (dragged) dragged.manuallyMoved = true;
+			for (const s of g.snapshot) {
+				const n = this.data.nodes.find((m) => m.id === s.id);
+				if (n) n.manuallyMoved = true;
+			}
 			this.scheduleSave();
 		}
 		if (this.dropTargetId) {
@@ -585,8 +635,11 @@ export class FormulaMindMapView extends ItemView {
 		if (nodeEl?.dataset.id) {
 			const id = nodeEl.dataset.id;
 			const node = this.data.nodes.find((n) => n.id === id);
-			if (node && (node.type ?? 'formula') === 'group') {
-				void this.toggleGroup(id);
+			const type = node?.type ?? 'formula';
+			const hasChildren = this.data.nodes.some((n) => n.parent === id);
+			const hasBody = !!(node?.body ?? '').trim();
+			if (type === 'group' || hasChildren || hasBody) {
+				void this.toggleCollapse(id);
 				return;
 			}
 			this.openEditor(id);
@@ -596,7 +649,7 @@ export class FormulaMindMapView extends ItemView {
 		const node: FMMNode = { id: genId(), parent: null, x, y, latex: '' };
 		this.data.nodes.push(node);
 		this.createNodeEl(node);
-		this.select(node.id);
+		this.selectSingle(node.id);
 		void this.renderNode(node.id);
 		this.updateEdges();
 		this.scheduleSave();
@@ -613,18 +666,19 @@ export class FormulaMindMapView extends ItemView {
 			const id = nodeEl.dataset.id;
 			const node = this.data.nodes.find((n) => n.id === id);
 			const type = node?.type ?? 'formula';
+			const hasChildren = this.data.nodes.some((n) => n.parent === id);
 			menu.addItem((item) =>
 				item
 					.setTitle(type === 'formula' ? '编辑公式' : '编辑内容')
 					.setIcon('pencil')
 					.onClick(() => this.openEditor(id))
 			);
-			if (type === 'group') {
+			if (type === 'group' || hasChildren) {
 				menu.addItem((item) =>
 					item
 						.setTitle(node?.collapsed ? '展开' : '收起')
 						.setIcon(node?.collapsed ? 'chevrons-down-up' : 'chevrons-up-down')
-						.onClick(() => void this.toggleGroup(id))
+						.onClick(() => void this.toggleCollapse(id))
 				);
 			}
 			if (node?.w) {
@@ -646,16 +700,23 @@ export class FormulaMindMapView extends ItemView {
 			);
 			menu.addSeparator();
 			menu.addItem((item) =>
-				item.setTitle('删除节点').setIcon('trash-2').onClick(() => this.deleteNode(id))
+				item.setTitle('删除节点').setIcon('trash-2').onClick(() => this.deleteNodes([id]))
 			);
 		} else {
+			menu.addItem((item) =>
+				item.setTitle('全选所有节点').setIcon('box-select').onClick(() => this.selectAll())
+			);
+			menu.addItem((item) =>
+				item.setTitle('取消全选').setIcon('square').onClick(() => this.clearSelection())
+			);
+			menu.addSeparator();
 			menu.addItem((item) =>
 				item.setTitle('新建根节点').setIcon('plus').onClick(() => {
 					const { x, y } = this.screenToWorld(e.clientX, e.clientY);
 					const node: FMMNode = { id: genId(), parent: null, x, y, latex: '' };
 					this.data.nodes.push(node);
 					this.createNodeEl(node);
-					this.select(node.id);
+					this.selectSingle(node.id);
 					void this.renderNode(node.id);
 					this.updateEdges();
 					this.scheduleSave();
@@ -687,29 +748,63 @@ export class FormulaMindMapView extends ItemView {
 				.catch(() => new Notice('无法读取剪贴板，请用右下角「导入」按钮粘贴'));
 			return;
 		}
-		if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedId) {
+		if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
 			e.preventDefault();
-			this.deleteNode(this.selectedId);
+			this.selectAll();
+			return;
+		}
+		if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedIds.size > 0) {
+			e.preventDefault();
+			this.deleteNodes([...this.selectedIds]);
 		} else if (e.key === 'Escape') {
-			this.select(null);
-		} else if (e.key === 'Enter' && this.selectedId) {
+			this.clearSelection();
+		} else if (e.key === 'Enter' && this.primaryId && this.selectedIds.size === 1) {
 			e.preventDefault();
-			this.openEditor(this.selectedId);
-		} else if (e.key === 'Tab' && this.selectedId) {
+			this.openEditor(this.primaryId);
+		} else if (e.key === 'Tab' && this.primaryId) {
 			e.preventDefault();
-			this.addChildNode(this.selectedId);
+			this.addChildNode(this.primaryId);
 		}
 	};
 
-	// ---------- 操作 ----------
+	// ---------- 选择 ----------
 
-	private select(id: string | null): void {
-		if (this.selectedId === id) return;
-		if (this.selectedId) this.nodeEls.get(this.selectedId)?.removeClass('fmm-selected');
-		this.selectedId = id;
-		if (id) this.nodeEls.get(id)?.addClass('fmm-selected');
+	private selectSingle(id: string | null): void {
+		this.selectedIds.clear();
+		if (id) this.selectedIds.add(id);
+		this.primaryId = id;
+		this.applySelectionStyles();
+	}
+
+	private toggleSelect(id: string): void {
+		if (this.selectedIds.has(id)) {
+			this.selectedIds.delete(id);
+		} else {
+			this.selectedIds.add(id);
+			this.primaryId = id;
+		}
+		this.applySelectionStyles();
+	}
+
+	private selectAll(): void {
+		this.selectedIds = new Set(this.visibleIds);
+		this.primaryId = this.data.nodes.find((n) => this.visibleIds.has(n.id))?.id ?? null;
+		this.applySelectionStyles();
+	}
+
+	private clearSelection(): void {
+		this.selectSingle(null);
+	}
+
+	private applySelectionStyles(): void {
+		for (const [id, el] of this.nodeEls) {
+			if (this.selectedIds.has(id)) el.addClass('fmm-selected');
+			else el.removeClass('fmm-selected');
+		}
 		this.updateEdges();
 	}
+
+	// ---------- 操作 ----------
 
 	private openEditor(id: string): void {
 		const node = this.data.nodes.find((n) => n.id === id);
@@ -735,6 +830,14 @@ export class FormulaMindMapView extends ItemView {
 	private addChildNode(parentId: string): void {
 		const parent = this.data.nodes.find((n) => n.id === parentId);
 		if (!parent) return;
+		// 折叠着的父节点先展开，避免新子节点直接被藏起来
+		if (parent.collapsed) {
+			parent.collapsed = false;
+			const col = this.nodeEls.get(parentId)?.querySelector('.fmm-node-collapse');
+			if (col) col.textContent = '▾';
+			void this.renderNode(parentId);
+		}
+		this.ensureCollapseButton(parent);
 		const siblingCount = this.data.nodes.filter((n) => n.parent === parentId).length;
 		const ps = this.nodeSize(parent);
 		const node: FMMNode = {
@@ -746,38 +849,42 @@ export class FormulaMindMapView extends ItemView {
 		};
 		this.data.nodes.push(node);
 		this.createNodeEl(node);
-		this.select(node.id);
+		this.selectSingle(node.id);
 		void this.renderNode(node.id);
-		this.updateEdges();
+		this.applyVisibility();
 		this.scheduleSave();
 		this.openEditor(node.id);
 	}
 
-	private deleteNode(id: string): void {
-		const node = this.data.nodes.find((n) => n.id === id);
-		if (!node) return;
-		const victims = [node, ...descendantsOf(this.data, id)];
+	private deleteNodes(ids: string[]): void {
+		const victims = new Set<string>();
+		for (const id of ids) {
+			const node = this.data.nodes.find((n) => n.id === id);
+			if (!node) continue;
+			victims.add(id);
+			for (const d of descendantsOf(this.data, id)) victims.add(d.id);
+		}
+		if (victims.size === 0) return;
 		new ConfirmModal(
 			this.app,
 			'删除节点',
-			`将删除该节点及其 ${victims.length - 1} 个子节点，确定吗？`,
+			`将删除 ${victims.size} 个节点，确定吗？`,
 			'删除',
 			() => {
-				const ids = new Set(victims.map((v) => v.id));
-				this.data.nodes = this.data.nodes.filter((n) => !ids.has(n.id));
-				for (const vid of ids) {
+				this.data.nodes = this.data.nodes.filter((n) => !victims.has(n.id));
+				for (const vid of victims) {
 					this.nodeEls.get(vid)?.remove();
 					this.nodeEls.delete(vid);
 					this.renderTokens.delete(vid);
 				}
-				if (this.selectedId && ids.has(this.selectedId)) this.selectedId = null;
+				this.clearSelection();
 				if (this.data.nodes.length === 0) {
 					const root = emptyData().nodes[0];
 					this.data.nodes.push(root);
 					this.createNodeEl(root);
 					void this.renderNode(root.id);
 				}
-				this.updateEdges();
+				this.applyVisibility();
 				this.scheduleSave();
 			}
 		).open();
@@ -792,11 +899,14 @@ export class FormulaMindMapView extends ItemView {
 		}).open();
 	}
 
-	private async toggleGroup(id: string): Promise<void> {
+	private async toggleCollapse(id: string): Promise<void> {
 		const node = this.data.nodes.find((n) => n.id === id);
 		const el = this.nodeEls.get(id);
-		if (!node || !el || (node.type ?? 'formula') !== 'group') return;
-		const oldH = el.offsetHeight;
+		if (!node || !el) return;
+		const type = node.type ?? 'formula';
+		const hasChildren = this.data.nodes.some((n) => n.parent === id);
+		if (type !== 'group' && !hasChildren) return;
+		const before = node.collapsed ? el.offsetHeight : this.subtreeHeight(node);
 		node.collapsed = !node.collapsed;
 		const col = el.querySelector('.fmm-node-collapse');
 		if (col) {
@@ -804,19 +914,31 @@ export class FormulaMindMapView extends ItemView {
 			col.setAttribute('aria-label', node.collapsed ? '展开' : '收起');
 		}
 		await this.renderNode(id);
-		const delta = el.offsetHeight - oldH;
-		this.shiftColumnBelow(id, delta);
-		this.scheduleEdges();
+		this.applyVisibility();
+		const after = node.collapsed ? el.offsetHeight : this.subtreeHeight(node);
+		this.shiftColumnBelow(id, after - before);
 		this.scheduleSave();
 	}
 
-	/** 节点高度变化（折叠/展开、调宽换行）后，把同列下方未手动挪过的节点顺移 */
+	/** 节点及其可见子树占据的高度（从节点顶部到子树最底端） */
+	private subtreeHeight(node: FMMNode): number {
+		let bottom = node.y + this.nodeSize(node).h;
+		for (const n of this.data.nodes) {
+			if (!this.visibleIds.has(n.id)) continue;
+			if (!isDescendant(this.data, n.id, node.id)) continue;
+			bottom = Math.max(bottom, n.y + this.nodeSize(n).h);
+		}
+		return bottom - node.y;
+	}
+
+	/** 节点高度变化（折叠/展开、调宽换行）后，把同列下方未手动挪过的可见节点顺移 */
 	private shiftColumnBelow(anchorId: string, delta: number): void {
 		if (!delta) return;
 		const anchor = this.data.nodes.find((n) => n.id === anchorId);
 		if (!anchor) return;
 		for (const n of this.data.nodes) {
 			if (n.id === anchorId || n.manuallyMoved) continue;
+			if (!this.visibleIds.has(n.id)) continue;
 			if (Math.abs(n.x - anchor.x) > 2) continue;
 			if (n.y <= anchor.y) continue;
 			n.y += delta;
@@ -870,7 +992,7 @@ export class FormulaMindMapView extends ItemView {
 			this.data.nodes.push(node);
 			this.createNodeEl(node);
 			await this.renderNode(node.id);
-			this.select(node.id);
+			this.selectSingle(node.id);
 			this.updateEdges();
 			this.scheduleSave();
 			this.fitView();
@@ -885,12 +1007,6 @@ export class FormulaMindMapView extends ItemView {
 		}
 		const root = parsed.nodes[0];
 		const children = parsed.nodes.slice(1);
-		root.x = baseX;
-		root.y = 0;
-		for (const n of children) {
-			n.x = baseX + 360;
-			n.y = 0;
-		}
 		this.data.nodes.push(...parsed.nodes);
 
 		const tasks: Promise<void>[] = [];
@@ -900,17 +1016,42 @@ export class FormulaMindMapView extends ItemView {
 		}
 		await Promise.all(tasks);
 
+		// 树状布局：根节点 → 第一层排成一列；每个分组的孩子排在该组右侧的子列
+		const rootEl = this.nodeEls.get(root.id);
+		root.x = baseX;
+		root.y = 0;
+		this.positionNode(root);
+		const level1X = baseX + (rootEl?.offsetWidth ?? 140) + 90;
+		const level1 = children.filter((n) => n.parent === root.id);
 		let cursor = 0;
-		for (const n of children) {
+		for (const n of level1) {
 			const el = this.nodeEls.get(n.id);
 			if (!el) continue;
+			n.x = level1X;
 			n.y = cursor;
 			this.positionNode(n);
 			cursor += el.offsetHeight + 28;
 		}
+		for (const n of parsed.nodes) {
+			if (n.id === root.id) continue;
+			const kids = children.filter((c) => c.parent === n.id);
+			if (!kids.length) continue;
+			const el = this.nodeEls.get(n.id);
+			if (!el) continue;
+			const kidX = n.x + el.offsetWidth + 90;
+			let cy = n.y;
+			for (const k of kids) {
+				const ke = this.nodeEls.get(k.id);
+				if (!ke) continue;
+				k.x = kidX;
+				k.y = cy;
+				this.positionNode(k);
+				cy += ke.offsetHeight + 24;
+			}
+		}
 
-		this.select(root.id);
-		this.updateEdges();
+		this.applyVisibility();
+		this.selectSingle(root.id);
 		this.scheduleSave();
 		this.fitView();
 		new Notice(`已导入 ${children.length} 个节点`);
@@ -954,6 +1095,7 @@ export class FormulaMindMapView extends ItemView {
 		let maxX = -Infinity;
 		let maxY = -Infinity;
 		for (const n of nodes) {
+			if (!this.visibleIds.has(n.id)) continue;
 			const s = this.nodeSize(n);
 			minX = Math.min(minX, n.x);
 			minY = Math.min(minY, n.y);

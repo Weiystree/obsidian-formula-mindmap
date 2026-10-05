@@ -25,7 +25,8 @@ var main_exports = {};
 __export(main_exports, {
   CATEGORY_LABELS: () => CATEGORY_LABELS,
   default: () => FormulaMindMapPlugin,
-  parseAIAnswer: () => parseAIAnswer
+  parseAIAnswer: () => parseAIAnswer,
+  suggestTextWidth: () => suggestTextWidth
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian4 = require("obsidian");
@@ -249,7 +250,7 @@ function mathInner(blockText) {
   if (s.endsWith("$$")) s = s.slice(0, -2);
   return s.trim();
 }
-function makeGroup(label, cat, body, parentId) {
+function makeGroup(label, cat, parentId) {
   return {
     id: genId(),
     parent: parentId,
@@ -259,9 +260,30 @@ function makeGroup(label, cat, body, parentId) {
     type: "group",
     category: cat,
     label,
-    body,
     collapsed: true
   };
+}
+function suggestTextWidth(body) {
+  const cleaned = body.replace(/\s+/g, "").replace(/[*#`>\\|]/g, "");
+  const sentences = cleaned.split(/[。！？；!?;]/).filter(Boolean);
+  let longest = 0;
+  for (const s of sentences) longest = Math.max(longest, s.length);
+  const width = Math.round(longest * 13.5 + 36);
+  return Math.min(560, Math.max(180, width));
+}
+function makeText(body, parentId, labelMax = 60) {
+  const node = {
+    id: genId(),
+    parent: parentId,
+    x: 0,
+    y: 0,
+    latex: "",
+    type: "text",
+    label: truncate(body, labelMax),
+    body
+  };
+  if (body.replace(/\s/g, "").length > 24) node.w = suggestTextWidth(body);
+  return node;
 }
 function parseAIAnswer(raw) {
   var _a;
@@ -294,10 +316,8 @@ function parseAIAnswer(raw) {
   };
   const nodes = [root];
   let openGroup = null;
-  let lastWasContent = false;
   const closeGroup = () => {
     openGroup = null;
-    lastWasContent = false;
   };
   for (let i = startIdx; i < blocks.length; i++) {
     const b = blocks[i];
@@ -306,33 +326,22 @@ function parseAIAnswer(raw) {
       const level = ((_a = b.text.match(/^#+/)) != null ? _a : ["#"])[0].length;
       const cat2 = detectCategory(b.text);
       if (cat2) {
-        const g = makeGroup(label, cat2, "", root.id);
+        const g = makeGroup(label, cat2, root.id);
         nodes.push(g);
         openGroup = g;
-        lastWasContent = false;
       } else if (level >= 3 && openGroup) {
-        openGroup.body = (openGroup.body ? openGroup.body + "\n\n" : "") + b.text;
-        lastWasContent = true;
+        nodes.push(makeText(b.text, openGroup.id, 40));
       } else {
         closeGroup();
-        nodes.push({
-          id: genId(),
-          parent: root.id,
-          x: 0,
-          y: 0,
-          latex: "",
-          type: "text",
-          label: truncate(label, 60),
-          body: label
-        });
+        nodes.push(makeText(label, root.id, 60));
       }
       continue;
     }
     if (b.kind === "math") {
       const inner = mathInner(b.text);
       if (!inner) continue;
-      if (openGroup && lastWasContent && !b.gapBefore) {
-        openGroup.body = (openGroup.body ? openGroup.body + "\n\n" : "") + b.text;
+      if (openGroup && !b.gapBefore) {
+        nodes.push({ id: genId(), parent: openGroup.id, x: 0, y: 0, latex: inner, type: "formula" });
         continue;
       }
       closeGroup();
@@ -341,42 +350,32 @@ function parseAIAnswer(raw) {
     }
     if (b.kind === "code") {
       if (openGroup && !b.gapBefore) {
-        openGroup.body = (openGroup.body ? openGroup.body + "\n\n" : "") + b.text;
+        nodes.push(makeText(b.text, openGroup.id, 20));
         continue;
       }
       closeGroup();
-      const g = makeGroup(CATEGORY_LABELS.code, "code", b.text, root.id);
+      const g = makeGroup(CATEGORY_LABELS.code, "code", root.id);
       nodes.push(g);
+      nodes.push(makeText(b.text, g.id, 20));
       openGroup = g;
-      lastWasContent = true;
       continue;
     }
     const cat = detectCategory(b.text);
     if (cat) {
-      const g = makeGroup(truncate(b.text, 30), cat, b.text, root.id);
+      const g = makeGroup(truncate(b.text, 30), cat, root.id);
       nodes.push(g);
+      nodes.push(makeText(b.text, g.id));
       openGroup = g;
-      lastWasContent = true;
       continue;
     }
     if (openGroup) {
-      openGroup.body = (openGroup.body ? openGroup.body + "\n\n" : "") + b.text;
-      lastWasContent = true;
+      nodes.push(makeText(b.text, openGroup.id));
       continue;
     }
-    nodes.push({
-      id: genId(),
-      parent: root.id,
-      x: 0,
-      y: 0,
-      latex: "",
-      type: "text",
-      label: truncate(b.text, 60),
-      body: b.text
-    });
+    nodes.push(makeText(b.text, root.id));
   }
   if (nodes.length === 1) {
-    nodes.push(makeGroup("\u5185\u5BB9", "note", src, root.id));
+    nodes.push(makeText(src, root.id, 80));
   }
   return { rootId: root.id, nodes };
 }
@@ -528,7 +527,9 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     this.ty = 0;
     this.gesture = null;
     this.dropTargetId = null;
-    this.selectedId = null;
+    this.selectedIds = /* @__PURE__ */ new Set();
+    this.primaryId = null;
+    this.visibleIds = /* @__PURE__ */ new Set();
     this.saveTimer = null;
     this.dirty = false;
     this.edgesScheduled = false;
@@ -542,7 +543,7 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       if (!parsed) return;
       if (serializeData(parsed) === serializeData(this.data)) return;
       this.data = parsed;
-      this.selectedId = null;
+      this.clearSelection();
       await this.renderAll();
     };
     // ---------- 交互 ----------
@@ -559,8 +560,24 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
         const node = this.data.nodes.find((n) => n.id === id);
         if (!node) return;
         if (target.closest(".fmm-node-add")) return;
+        if (e.shiftKey || e.ctrlKey || e.metaKey) {
+          this.toggleSelect(id);
+          return;
+        }
+        this.selectSingle(id);
+        const dragIds = /* @__PURE__ */ new Set([id, ...descendantsOf(this.data, id).map((n) => n.id)]);
+        if (this.selectedIds.has(id) && this.selectedIds.size > 1) {
+          for (const sid of this.selectedIds) {
+            dragIds.add(sid);
+            for (const d of descendantsOf(this.data, sid)) dragIds.add(d.id);
+          }
+        }
+        const snapshot = [];
+        for (const did of dragIds) {
+          const n = this.data.nodes.find((m) => m.id === did);
+          if (n) snapshot.push({ id: did, x: n.x, y: n.y });
+        }
         if (target.closest(".fmm-node-resize")) {
-          this.select(id);
           this.gesture = {
             kind: "resize",
             id,
@@ -568,22 +585,16 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
             startW: (_a = node.w) != null ? _a : nodeEl.offsetWidth,
             oldH: nodeEl.offsetHeight
           };
-          try {
-            this.canvasEl.setPointerCapture(e.pointerId);
-          } catch (err) {
-          }
-          return;
+        } else {
+          this.gesture = {
+            kind: "drag",
+            id,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
+            moved: false,
+            snapshot
+          };
         }
-        this.select(id);
-        this.gesture = {
-          kind: "drag",
-          id,
-          startClientX: e.clientX,
-          startClientY: e.clientY,
-          startX: node.x,
-          startY: node.y,
-          moved: false
-        };
       } else {
         this.gesture = {
           kind: "pan",
@@ -632,11 +643,15 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
         this.ty = g.startTy + dyScreen;
         this.applyTransform();
       } else {
-        const node = this.data.nodes.find((n) => n.id === g.id);
-        if (!node) return;
-        node.x = g.startX + dxScreen / this.scale;
-        node.y = g.startY + dyScreen / this.scale;
-        this.positionNode(node);
+        const dxw = dxScreen / this.scale;
+        const dyw = dyScreen / this.scale;
+        for (const s of g.snapshot) {
+          const n = this.data.nodes.find((m) => m.id === s.id);
+          if (!n) continue;
+          n.x = s.x + dxw;
+          n.y = s.y + dyw;
+          this.positionNode(n);
+        }
         this.scheduleEdges();
         this.updateDropTarget(g.id, e);
       }
@@ -651,7 +666,7 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       } catch (err) {
       }
       if (g.kind === "pan") {
-        if (!g.moved) this.select(null);
+        if (!g.moved) this.clearSelection();
         return;
       }
       if (g.kind === "resize") {
@@ -670,8 +685,10 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
         el.style.pointerEvents = "";
       }
       if (g.moved) {
-        const dragged = this.data.nodes.find((n) => n.id === g.id);
-        if (dragged) dragged.manuallyMoved = true;
+        for (const s of g.snapshot) {
+          const n = this.data.nodes.find((m) => m.id === s.id);
+          if (n) n.manuallyMoved = true;
+        }
         this.scheduleSave();
       }
       if (this.dropTargetId) {
@@ -696,7 +713,7 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       this.clearDropTarget();
     };
     this.onDblClick = (e) => {
-      var _a;
+      var _a, _b;
       const target = e.target;
       if (!target || typeof target.closest !== "function") return;
       if (target.closest(".fmm-zoom")) return;
@@ -705,8 +722,11 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       if (nodeEl == null ? void 0 : nodeEl.dataset.id) {
         const id = nodeEl.dataset.id;
         const node2 = this.data.nodes.find((n) => n.id === id);
-        if (node2 && ((_a = node2.type) != null ? _a : "formula") === "group") {
-          void this.toggleGroup(id);
+        const type = (_a = node2 == null ? void 0 : node2.type) != null ? _a : "formula";
+        const hasChildren = this.data.nodes.some((n) => n.parent === id);
+        const hasBody = !!((_b = node2 == null ? void 0 : node2.body) != null ? _b : "").trim();
+        if (type === "group" || hasChildren || hasBody) {
+          void this.toggleCollapse(id);
           return;
         }
         this.openEditor(id);
@@ -716,7 +736,7 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       const node = { id: genId(), parent: null, x, y, latex: "" };
       this.data.nodes.push(node);
       this.createNodeEl(node);
-      this.select(node.id);
+      this.selectSingle(node.id);
       void this.renderNode(node.id);
       this.updateEdges();
       this.scheduleSave();
@@ -733,12 +753,13 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
         const id = nodeEl.dataset.id;
         const node = this.data.nodes.find((n) => n.id === id);
         const type = (_a = node == null ? void 0 : node.type) != null ? _a : "formula";
+        const hasChildren = this.data.nodes.some((n) => n.parent === id);
         menu.addItem(
           (item) => item.setTitle(type === "formula" ? "\u7F16\u8F91\u516C\u5F0F" : "\u7F16\u8F91\u5185\u5BB9").setIcon("pencil").onClick(() => this.openEditor(id))
         );
-        if (type === "group") {
+        if (type === "group" || hasChildren) {
           menu.addItem(
-            (item) => item.setTitle((node == null ? void 0 : node.collapsed) ? "\u5C55\u5F00" : "\u6536\u8D77").setIcon((node == null ? void 0 : node.collapsed) ? "chevrons-down-up" : "chevrons-up-down").onClick(() => void this.toggleGroup(id))
+            (item) => item.setTitle((node == null ? void 0 : node.collapsed) ? "\u5C55\u5F00" : "\u6536\u8D77").setIcon((node == null ? void 0 : node.collapsed) ? "chevrons-down-up" : "chevrons-up-down").onClick(() => void this.toggleCollapse(id))
           );
         }
         if (node == null ? void 0 : node.w) {
@@ -760,16 +781,23 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
         );
         menu.addSeparator();
         menu.addItem(
-          (item) => item.setTitle("\u5220\u9664\u8282\u70B9").setIcon("trash-2").onClick(() => this.deleteNode(id))
+          (item) => item.setTitle("\u5220\u9664\u8282\u70B9").setIcon("trash-2").onClick(() => this.deleteNodes([id]))
         );
       } else {
+        menu.addItem(
+          (item) => item.setTitle("\u5168\u9009\u6240\u6709\u8282\u70B9").setIcon("box-select").onClick(() => this.selectAll())
+        );
+        menu.addItem(
+          (item) => item.setTitle("\u53D6\u6D88\u5168\u9009").setIcon("square").onClick(() => this.clearSelection())
+        );
+        menu.addSeparator();
         menu.addItem(
           (item) => item.setTitle("\u65B0\u5EFA\u6839\u8282\u70B9").setIcon("plus").onClick(() => {
             const { x, y } = this.screenToWorld(e.clientX, e.clientY);
             const node = { id: genId(), parent: null, x, y, latex: "" };
             this.data.nodes.push(node);
             this.createNodeEl(node);
-            this.select(node.id);
+            this.selectSingle(node.id);
             void this.renderNode(node.id);
             this.updateEdges();
             this.scheduleSave();
@@ -797,17 +825,22 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
         }).catch(() => new import_obsidian3.Notice("\u65E0\u6CD5\u8BFB\u53D6\u526A\u8D34\u677F\uFF0C\u8BF7\u7528\u53F3\u4E0B\u89D2\u300C\u5BFC\u5165\u300D\u6309\u94AE\u7C98\u8D34"));
         return;
       }
-      if ((e.key === "Delete" || e.key === "Backspace") && this.selectedId) {
+      if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
         e.preventDefault();
-        this.deleteNode(this.selectedId);
+        this.selectAll();
+        return;
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && this.selectedIds.size > 0) {
+        e.preventDefault();
+        this.deleteNodes([...this.selectedIds]);
       } else if (e.key === "Escape") {
-        this.select(null);
-      } else if (e.key === "Enter" && this.selectedId) {
+        this.clearSelection();
+      } else if (e.key === "Enter" && this.primaryId && this.selectedIds.size === 1) {
         e.preventDefault();
-        this.openEditor(this.selectedId);
-      } else if (e.key === "Tab" && this.selectedId) {
+        this.openEditor(this.primaryId);
+      } else if (e.key === "Tab" && this.primaryId) {
         e.preventDefault();
-        this.addChildNode(this.selectedId);
+        this.addChildNode(this.primaryId);
       }
     };
   }
@@ -934,7 +967,18 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       tasks.push(this.renderNode(node.id));
     }
     await Promise.all(tasks);
-    this.updateEdges();
+    this.applyVisibility();
+  }
+  ensureCollapseButton(node) {
+    const el = this.nodeEls.get(node.id);
+    if (!el || el.querySelector(".fmm-node-collapse")) return;
+    const col = el.createEl("button", { text: node.collapsed ? "\u25B8" : "\u25BE" });
+    col.addClass("fmm-node-collapse");
+    col.setAttribute("aria-label", node.collapsed ? "\u5C55\u5F00" : "\u6536\u8D77");
+    col.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void this.toggleCollapse(node.id);
+    });
   }
   createNodeEl(node) {
     var _a;
@@ -950,17 +994,9 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       el.style.maxWidth = "none";
     }
     el.createDiv("fmm-node-content");
+    if (type === "group") this.ensureCollapseButton(node);
     const grip = el.createDiv("fmm-node-resize");
     grip.setAttribute("aria-label", "\u62D6\u52A8\u8C03\u6574\u8282\u70B9\u5BBD\u5EA6");
-    if (type === "group") {
-      const col = el.createEl("button", { text: node.collapsed ? "\u25B8" : "\u25BE" });
-      col.addClass("fmm-node-collapse");
-      col.setAttribute("aria-label", node.collapsed ? "\u5C55\u5F00" : "\u6536\u8D77");
-      col.addEventListener("click", (e) => {
-        e.stopPropagation();
-        void this.toggleGroup(node.id);
-      });
-    }
     const addBtn = el.createEl("button", { text: "+" });
     addBtn.addClass("fmm-node-add");
     addBtn.setAttribute("aria-label", "\u6DFB\u52A0\u5B50\u8282\u70B9");
@@ -986,9 +1022,12 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     if (type === "group") {
       const title = content.createDiv("fmm-group-title");
       title.setText(node.label || CATEGORY_LABELS[node.category] || "\u5206\u7EC4");
+      const childCount = this.data.nodes.filter((n) => n.parent === id).length;
       if (node.collapsed) {
-        const paras = ((_c = node.body) != null ? _c : "").split(/\n{2,}/).filter((s) => s.trim()).length;
-        content.createDiv("fmm-group-meta").setText(`${paras} \u6BB5\u5185\u5BB9 \xB7 \u53CC\u51FB\u5C55\u5F00`);
+        const paras = childCount || ((_c = node.body) != null ? _c : "").split(/\n{2,}/).filter((s) => s.trim()).length;
+        content.createDiv("fmm-group-meta").setText(`${paras} \u6761\u5185\u5BB9 \xB7 \u53CC\u51FB\u5C55\u5F00`);
+      } else if (childCount) {
+        content.createDiv("fmm-group-meta").setText("\u53CC\u51FB\u6536\u8D77");
       } else {
         const bodyEl = content.createDiv("fmm-group-body");
         const body = ((_d = node.body) != null ? _d : "").trim();
@@ -1058,8 +1097,9 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     const NS = "http://www.w3.org/2000/svg";
     for (const node of this.data.nodes) {
       if (!node.parent) continue;
+      if (!this.visibleIds.has(node.id)) continue;
       const parent = this.data.nodes.find((n) => n.id === node.parent);
-      if (!parent) continue;
+      if (!parent || !this.visibleIds.has(parent.id)) continue;
       const ps = this.nodeSize(parent);
       const cs = this.nodeSize(node);
       const x1 = parent.x + ps.w / 2;
@@ -1069,11 +1109,36 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       const dx = (x2 - x1) / 2;
       const path = document.createElementNS(NS, "path");
       path.setAttribute("d", `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`);
-      if (node.id === this.selectedId || node.parent === this.selectedId) {
+      if (this.selectedIds.has(node.id) || node.parent && this.selectedIds.has(node.parent)) {
         path.classList.add("fmm-edge-selected");
       }
       svg.appendChild(path);
     }
+  }
+  applyVisibility() {
+    var _a;
+    const visible = /* @__PURE__ */ new Set();
+    const childrenOf = /* @__PURE__ */ new Map();
+    for (const n of this.data.nodes) {
+      if (!n.parent) continue;
+      const list = (_a = childrenOf.get(n.parent)) != null ? _a : [];
+      list.push(n);
+      childrenOf.set(n.parent, list);
+    }
+    const walk = (n) => {
+      var _a2;
+      visible.add(n.id);
+      if (n.collapsed) return;
+      for (const child of (_a2 = childrenOf.get(n.id)) != null ? _a2 : []) walk(child);
+    };
+    for (const n of this.data.nodes) {
+      if (!n.parent) walk(n);
+    }
+    this.visibleIds = visible;
+    for (const [id, el] of this.nodeEls) {
+      el.style.display = visible.has(id) ? "" : "none";
+    }
+    this.updateEdges();
   }
   applyTransform() {
     const t = `translate(${this.tx}px, ${this.ty}px) scale(${this.scale})`;
@@ -1109,15 +1174,39 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     }
     return null;
   }
-  // ---------- 操作 ----------
-  select(id) {
+  // ---------- 选择 ----------
+  selectSingle(id) {
+    this.selectedIds.clear();
+    if (id) this.selectedIds.add(id);
+    this.primaryId = id;
+    this.applySelectionStyles();
+  }
+  toggleSelect(id) {
+    if (this.selectedIds.has(id)) {
+      this.selectedIds.delete(id);
+    } else {
+      this.selectedIds.add(id);
+      this.primaryId = id;
+    }
+    this.applySelectionStyles();
+  }
+  selectAll() {
     var _a, _b;
-    if (this.selectedId === id) return;
-    if (this.selectedId) (_a = this.nodeEls.get(this.selectedId)) == null ? void 0 : _a.removeClass("fmm-selected");
-    this.selectedId = id;
-    if (id) (_b = this.nodeEls.get(id)) == null ? void 0 : _b.addClass("fmm-selected");
+    this.selectedIds = new Set(this.visibleIds);
+    this.primaryId = (_b = (_a = this.data.nodes.find((n) => this.visibleIds.has(n.id))) == null ? void 0 : _a.id) != null ? _b : null;
+    this.applySelectionStyles();
+  }
+  clearSelection() {
+    this.selectSingle(null);
+  }
+  applySelectionStyles() {
+    for (const [id, el] of this.nodeEls) {
+      if (this.selectedIds.has(id)) el.addClass("fmm-selected");
+      else el.removeClass("fmm-selected");
+    }
     this.updateEdges();
   }
+  // ---------- 操作 ----------
   openEditor(id) {
     var _a, _b;
     const node = this.data.nodes.find((n) => n.id === id);
@@ -1140,8 +1229,16 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     }).open();
   }
   addChildNode(parentId) {
+    var _a;
     const parent = this.data.nodes.find((n) => n.id === parentId);
     if (!parent) return;
+    if (parent.collapsed) {
+      parent.collapsed = false;
+      const col = (_a = this.nodeEls.get(parentId)) == null ? void 0 : _a.querySelector(".fmm-node-collapse");
+      if (col) col.textContent = "\u25BE";
+      void this.renderNode(parentId);
+    }
+    this.ensureCollapseButton(parent);
     const siblingCount = this.data.nodes.filter((n) => n.parent === parentId).length;
     const ps = this.nodeSize(parent);
     const node = {
@@ -1153,38 +1250,42 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     };
     this.data.nodes.push(node);
     this.createNodeEl(node);
-    this.select(node.id);
+    this.selectSingle(node.id);
     void this.renderNode(node.id);
-    this.updateEdges();
+    this.applyVisibility();
     this.scheduleSave();
     this.openEditor(node.id);
   }
-  deleteNode(id) {
-    const node = this.data.nodes.find((n) => n.id === id);
-    if (!node) return;
-    const victims = [node, ...descendantsOf(this.data, id)];
+  deleteNodes(ids) {
+    const victims = /* @__PURE__ */ new Set();
+    for (const id of ids) {
+      const node = this.data.nodes.find((n) => n.id === id);
+      if (!node) continue;
+      victims.add(id);
+      for (const d of descendantsOf(this.data, id)) victims.add(d.id);
+    }
+    if (victims.size === 0) return;
     new ConfirmModal(
       this.app,
       "\u5220\u9664\u8282\u70B9",
-      `\u5C06\u5220\u9664\u8BE5\u8282\u70B9\u53CA\u5176 ${victims.length - 1} \u4E2A\u5B50\u8282\u70B9\uFF0C\u786E\u5B9A\u5417\uFF1F`,
+      `\u5C06\u5220\u9664 ${victims.size} \u4E2A\u8282\u70B9\uFF0C\u786E\u5B9A\u5417\uFF1F`,
       "\u5220\u9664",
       () => {
         var _a;
-        const ids = new Set(victims.map((v) => v.id));
-        this.data.nodes = this.data.nodes.filter((n) => !ids.has(n.id));
-        for (const vid of ids) {
+        this.data.nodes = this.data.nodes.filter((n) => !victims.has(n.id));
+        for (const vid of victims) {
           (_a = this.nodeEls.get(vid)) == null ? void 0 : _a.remove();
           this.nodeEls.delete(vid);
           this.renderTokens.delete(vid);
         }
-        if (this.selectedId && ids.has(this.selectedId)) this.selectedId = null;
+        this.clearSelection();
         if (this.data.nodes.length === 0) {
           const root = emptyData().nodes[0];
           this.data.nodes.push(root);
           this.createNodeEl(root);
           void this.renderNode(root.id);
         }
-        this.updateEdges();
+        this.applyVisibility();
         this.scheduleSave();
       }
     ).open();
@@ -1196,12 +1297,15 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       void this.importAnswer(text, mode);
     }).open();
   }
-  async toggleGroup(id) {
+  async toggleCollapse(id) {
     var _a;
     const node = this.data.nodes.find((n) => n.id === id);
     const el = this.nodeEls.get(id);
-    if (!node || !el || ((_a = node.type) != null ? _a : "formula") !== "group") return;
-    const oldH = el.offsetHeight;
+    if (!node || !el) return;
+    const type = (_a = node.type) != null ? _a : "formula";
+    const hasChildren = this.data.nodes.some((n) => n.parent === id);
+    if (type !== "group" && !hasChildren) return;
+    const before = node.collapsed ? el.offsetHeight : this.subtreeHeight(node);
     node.collapsed = !node.collapsed;
     const col = el.querySelector(".fmm-node-collapse");
     if (col) {
@@ -1209,18 +1313,29 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       col.setAttribute("aria-label", node.collapsed ? "\u5C55\u5F00" : "\u6536\u8D77");
     }
     await this.renderNode(id);
-    const delta = el.offsetHeight - oldH;
-    this.shiftColumnBelow(id, delta);
-    this.scheduleEdges();
+    this.applyVisibility();
+    const after = node.collapsed ? el.offsetHeight : this.subtreeHeight(node);
+    this.shiftColumnBelow(id, after - before);
     this.scheduleSave();
   }
-  /** 节点高度变化（折叠/展开、调宽换行）后，把同列下方未手动挪过的节点顺移 */
+  /** 节点及其可见子树占据的高度（从节点顶部到子树最底端） */
+  subtreeHeight(node) {
+    let bottom = node.y + this.nodeSize(node).h;
+    for (const n of this.data.nodes) {
+      if (!this.visibleIds.has(n.id)) continue;
+      if (!isDescendant(this.data, n.id, node.id)) continue;
+      bottom = Math.max(bottom, n.y + this.nodeSize(n).h);
+    }
+    return bottom - node.y;
+  }
+  /** 节点高度变化（折叠/展开、调宽换行）后，把同列下方未手动挪过的可见节点顺移 */
   shiftColumnBelow(anchorId, delta) {
     if (!delta) return;
     const anchor = this.data.nodes.find((n) => n.id === anchorId);
     if (!anchor) return;
     for (const n of this.data.nodes) {
       if (n.id === anchorId || n.manuallyMoved) continue;
+      if (!this.visibleIds.has(n.id)) continue;
       if (Math.abs(n.x - anchor.x) > 2) continue;
       if (n.y <= anchor.y) continue;
       n.y += delta;
@@ -1228,7 +1343,7 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     }
   }
   async importAnswer(text, mode = "auto") {
-    var _a;
+    var _a, _b;
     const trimmed = (text != null ? text : "").trim();
     if (!trimmed) {
       new import_obsidian3.Notice("\u5185\u5BB9\u4E3A\u7A7A");
@@ -1265,7 +1380,7 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       this.data.nodes.push(node);
       this.createNodeEl(node);
       await this.renderNode(node.id);
-      this.select(node.id);
+      this.selectSingle(node.id);
       this.updateEdges();
       this.scheduleSave();
       this.fitView();
@@ -1279,12 +1394,6 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     }
     const root = parsed.nodes[0];
     const children = parsed.nodes.slice(1);
-    root.x = baseX;
-    root.y = 0;
-    for (const n of children) {
-      n.x = baseX + 360;
-      n.y = 0;
-    }
     this.data.nodes.push(...parsed.nodes);
     const tasks = [];
     for (const n of parsed.nodes) {
@@ -1292,16 +1401,40 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
       tasks.push(this.renderNode(n.id));
     }
     await Promise.all(tasks);
+    const rootEl = this.nodeEls.get(root.id);
+    root.x = baseX;
+    root.y = 0;
+    this.positionNode(root);
+    const level1X = baseX + ((_b = rootEl == null ? void 0 : rootEl.offsetWidth) != null ? _b : 140) + 90;
+    const level1 = children.filter((n) => n.parent === root.id);
     let cursor = 0;
-    for (const n of children) {
+    for (const n of level1) {
       const el = this.nodeEls.get(n.id);
       if (!el) continue;
+      n.x = level1X;
       n.y = cursor;
       this.positionNode(n);
       cursor += el.offsetHeight + 28;
     }
-    this.select(root.id);
-    this.updateEdges();
+    for (const n of parsed.nodes) {
+      if (n.id === root.id) continue;
+      const kids = children.filter((c) => c.parent === n.id);
+      if (!kids.length) continue;
+      const el = this.nodeEls.get(n.id);
+      if (!el) continue;
+      const kidX = n.x + el.offsetWidth + 90;
+      let cy = n.y;
+      for (const k of kids) {
+        const ke = this.nodeEls.get(k.id);
+        if (!ke) continue;
+        k.x = kidX;
+        k.y = cy;
+        this.positionNode(k);
+        cy += ke.offsetHeight + 24;
+      }
+    }
+    this.applyVisibility();
+    this.selectSingle(root.id);
     this.scheduleSave();
     this.fitView();
     new import_obsidian3.Notice(`\u5DF2\u5BFC\u5165 ${children.length} \u4E2A\u8282\u70B9`);
@@ -1340,6 +1473,7 @@ var FormulaMindMapView = class extends import_obsidian3.ItemView {
     let maxX = -Infinity;
     let maxY = -Infinity;
     for (const n of nodes) {
+      if (!this.visibleIds.has(n.id)) continue;
       const s = this.nodeSize(n);
       minX = Math.min(minX, n.x);
       minY = Math.min(minY, n.y);

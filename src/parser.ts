@@ -150,7 +150,7 @@ function mathInner(blockText: string): string {
 	return s.trim();
 }
 
-function makeGroup(label: string, cat: FMMCategory, body: string, parentId: string): FMMNode {
+function makeGroup(label: string, cat: FMMCategory, parentId: string): FMMNode {
 	return {
 		id: genId(),
 		parent: parentId,
@@ -160,9 +160,36 @@ function makeGroup(label: string, cat: FMMCategory, body: string, parentId: stri
 		type: 'group',
 		category: cat,
 		label,
-		body,
 		collapsed: true,
 	};
+}
+
+/**
+ * 按内容估算文字节点的合适宽度：按「。！？；」切句，取最长句估宽，
+ * 让换行基本落在句子边界上，避免出现太窄的碎框。
+ */
+export function suggestTextWidth(body: string): number {
+	const cleaned = body.replace(/\s+/g, '').replace(/[*#`>\\|]/g, '');
+	const sentences = cleaned.split(/[。！？；!?;]/).filter(Boolean);
+	let longest = 0;
+	for (const s of sentences) longest = Math.max(longest, s.length);
+	const width = Math.round(longest * 13.5 + 36);
+	return Math.min(560, Math.max(180, width));
+}
+
+function makeText(body: string, parentId: string, labelMax = 60): FMMNode {
+	const node: FMMNode = {
+		id: genId(),
+		parent: parentId,
+		x: 0,
+		y: 0,
+		latex: '',
+		type: 'text',
+		label: truncate(body, labelMax),
+		body,
+	};
+	if (body.replace(/\s/g, '').length > 24) node.w = suggestTextWidth(body);
+	return node;
 }
 
 export interface AIAnswerParseResult {
@@ -171,10 +198,11 @@ export interface AIAnswerParseResult {
 }
 
 /**
- * 把 AI 回答（Markdown + LaTeX）解析成导图节点：
+ * 把 AI 回答（Markdown + LaTeX）解析成导图节点（树状）：
  * - 独立的 $$ 公式块 → 核心公式节点（formula）
- * - 以「证明/推导/例子/定理/注意/代码」等开头的段落或标题 → 折叠分组节点（group）
- * - 其余文字 → 文字节点（text）；分组打开期间的内容并入分组
+ * - 以「证明/推导/例子/定理/注意/代码」等开头的段落或标题 → 分组节点（group），
+ *   组内每个段落/公式再拆成分组的孩子节点，实现层层展开
+ * - 其余文字 → 文字节点（text）
  */
 export function parseAIAnswer(raw: string): AIAnswerParseResult | null {
 	const src = normalizeDelimiters((raw ?? '').trim());
@@ -208,10 +236,8 @@ export function parseAIAnswer(raw: string): AIAnswerParseResult | null {
 	};
 	const nodes: FMMNode[] = [root];
 	let openGroup: FMMNode | null = null;
-	let lastWasContent = false;
 	const closeGroup = () => {
 		openGroup = null;
-		lastWasContent = false;
 	};
 
 	for (let i = startIdx; i < blocks.length; i++) {
@@ -221,34 +247,23 @@ export function parseAIAnswer(raw: string): AIAnswerParseResult | null {
 			const level = (b.text.match(/^#+/) ?? ['#'])[0].length;
 			const cat = detectCategory(b.text);
 			if (cat) {
-				const g = makeGroup(label, cat, '', root.id);
+				const g = makeGroup(label, cat, root.id);
 				nodes.push(g);
 				openGroup = g;
-				lastWasContent = false;
 			} else if (level >= 3 && openGroup) {
 				// 三级以下的小标题并入当前分组，不打断
-				openGroup.body = (openGroup.body ? openGroup.body + '\n\n' : '') + b.text;
-				lastWasContent = true;
+				nodes.push(makeText(b.text, openGroup.id, 40));
 			} else {
 				closeGroup();
-				nodes.push({
-					id: genId(),
-					parent: root.id,
-					x: 0,
-					y: 0,
-					latex: '',
-					type: 'text',
-					label: truncate(label, 60),
-					body: label,
-				});
+				nodes.push(makeText(label, root.id, 60));
 			}
 			continue;
 		}
 		if (b.kind === 'math') {
 			const inner = mathInner(b.text);
 			if (!inner) continue;
-			if (openGroup && lastWasContent && !b.gapBefore) {
-				openGroup.body = (openGroup.body ? openGroup.body + '\n\n' : '') + b.text;
+			if (openGroup && !b.gapBefore) {
+				nodes.push({ id: genId(), parent: openGroup.id, x: 0, y: 0, latex: inner, type: 'formula' });
 				continue;
 			}
 			closeGroup();
@@ -257,44 +272,35 @@ export function parseAIAnswer(raw: string): AIAnswerParseResult | null {
 		}
 		if (b.kind === 'code') {
 			if (openGroup && !b.gapBefore) {
-				openGroup.body = (openGroup.body ? openGroup.body + '\n\n' : '') + b.text;
+				nodes.push(makeText(b.text, openGroup.id, 20));
 				continue;
 			}
 			closeGroup();
-			const g = makeGroup(CATEGORY_LABELS.code, 'code', b.text, root.id);
+			const g = makeGroup(CATEGORY_LABELS.code, 'code', root.id);
 			nodes.push(g);
+			nodes.push(makeText(b.text, g.id, 20));
 			openGroup = g;
-			lastWasContent = true;
 			continue;
 		}
 		// text 段落
 		const cat = detectCategory(b.text);
 		if (cat) {
-			const g = makeGroup(truncate(b.text, 30), cat, b.text, root.id);
+			const g = makeGroup(truncate(b.text, 30), cat, root.id);
 			nodes.push(g);
+			// 开组的这段文字本身作为组的第一个孩子，避免内容丢失
+			nodes.push(makeText(b.text, g.id));
 			openGroup = g;
-			lastWasContent = true;
 			continue;
 		}
 		if (openGroup) {
-			openGroup.body = (openGroup.body ? openGroup.body + '\n\n' : '') + b.text;
-			lastWasContent = true;
+			nodes.push(makeText(b.text, openGroup.id));
 			continue;
 		}
-		nodes.push({
-			id: genId(),
-			parent: root.id,
-			x: 0,
-			y: 0,
-			latex: '',
-			type: 'text',
-			label: truncate(b.text, 60),
-			body: b.text,
-		});
+		nodes.push(makeText(b.text, root.id));
 	}
 
 	if (nodes.length === 1) {
-		nodes.push(makeGroup('内容', 'note', src, root.id));
+		nodes.push(makeText(src, root.id, 80));
 	}
 	return { rootId: root.id, nodes };
 }
